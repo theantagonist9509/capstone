@@ -47,7 +47,7 @@ NUM_WORKERS    = 4
 VAL_SPLIT      = 0.2          # fraction held out for validation
 LEARNING_RATE  = 1e-4         # lower LR appropriate for fine-tuning
 NUM_EPOCHS     = 20
-CHECKPOINT_DIR = "../checkpoints/efficientnet_mel_nv_ae"
+CHECKPOINT_DIR = "../checkpoints/efficientnet_nv_mel_ae"
 DEVICE         = "cuda" if torch.cuda.is_available() else "cpu"
 LABEL_NAMES    = ["NV", "MEL"]
 

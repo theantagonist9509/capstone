@@ -28,7 +28,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler, random_split
 from torchvision import transforms, models
 import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
 from tqdm import tqdm
 
 parent_dir = os.path.abspath(os.path.join(os.getcwd(), ".."))
@@ -49,7 +49,8 @@ NUM_WORKERS    = 4
 VAL_SPLIT      = 0.2          # fraction held out for validation
 LEARNING_RATE  = 1e-4         # lower LR appropriate for fine-tuning
 NUM_EPOCHS     = 20
-CHECKPOINT_DIR = "../checkpoints/efficientnet_mel_nv"
+LABEL_SMOOTHING= 0.3          # aggressive label smoothing
+CHECKPOINT_DIR = "../checkpoints/efficientnet_nv_mel_classifier/run_2"
 DEVICE         = "cuda" if torch.cuda.is_available() else "cpu"
 LABEL_NAMES    = ["NV", "MEL"]
 
@@ -230,9 +231,13 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
 
 # ── History buffers ───────────────────────────────────────────────────────────
 train_losses     = []
-train_accuracies = []
 val_losses       = []
 val_aucs         = []
+val_conf_matrices= []
+val_accuracies   = []
+val_precisions   = []
+val_recalls      = []
+val_f1s          = []
 start_epoch      = 1
 
 # ── Resume from latest checkpoint if one exists ───────────────────────────────
@@ -245,9 +250,13 @@ if existing:
     scheduler.load_state_dict(ckpt["sched_state"])
     start_epoch      = ckpt["epoch"] + 1
     train_losses     = ckpt.get("train_losses", [])
-    train_accuracies = ckpt.get("train_accuracies", [])
     val_losses       = ckpt.get("val_losses", [])
     val_aucs         = ckpt.get("val_aucs", [])
+    val_conf_matrices= ckpt.get("val_conf_matrices", [])
+    val_accuracies   = ckpt.get("val_accuracies", [])
+    val_precisions   = ckpt.get("val_precisions", [])
+    val_recalls      = ckpt.get("val_recalls", [])
+    val_f1s          = ckpt.get("val_f1s", [])
     print(f"Resumed from '{latest}' (epoch {ckpt['epoch']} of {NUM_EPOCHS})")
 else:
     print("No checkpoint found – starting from scratch.")
@@ -262,33 +271,32 @@ for epoch in range(start_epoch, NUM_EPOCHS + 1):
     # ── Train ─────────────────────────────────────────────────────────────────
     model.train()
     running_loss = 0.0
-    correct      = 0
     total        = 0
 
     pbar = tqdm(train_loader, desc=f"Epoch [{epoch:>3}/{NUM_EPOCHS}] train", leave=False)
     for imgs, labels_onehot in pbar:
         imgs          = imgs.to(DEVICE, non_blocking=True)
         labels_onehot = labels_onehot.to(DEVICE, non_blocking=True)
-        labels        = labels_onehot.argmax(dim=1)
+        labels        = labels_onehot.argmax(dim=1).float()
+
+        # Apply aggressive label smoothing
+        smoothed_labels = labels * (1.0 - LABEL_SMOOTHING) + 0.5 * LABEL_SMOOTHING
 
         logits = model(imgs).squeeze(-1)
-        loss   = criterion(logits, labels.float())
+        loss   = criterion(logits, smoothed_labels)
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
         running_loss += loss.item() * imgs.size(0)
-        correct      += ((logits > 0) == labels).sum().item()
         total        += imgs.size(0)
-        pbar.set_postfix(loss=f"{running_loss / total:.4f}", acc=f"{100.0 * correct / total:.1f}%")
+        pbar.set_postfix(loss=f"{running_loss / total:.4f}")
 
     scheduler.step()
 
     train_loss = running_loss / total
-    train_acc  = 100.0 * correct / total
     train_losses.append(train_loss)
-    train_accuracies.append(train_acc)
 
     # ── Validate ──────────────────────────────────────────────────────────────
     model.eval()
@@ -312,15 +320,28 @@ for epoch in range(start_epoch, NUM_EPOCHS + 1):
             all_targets.extend(labels.cpu().numpy())
 
     val_loss = val_running_loss / val_total
+    
+    all_preds = (np.array(all_logits) > 0).astype(int)
     val_auc  = roc_auc_score(all_targets, all_logits)
+    val_acc  = accuracy_score(all_targets, all_preds)
+    val_prec = precision_score(all_targets, all_preds, zero_division=0)
+    val_rec  = recall_score(all_targets, all_preds, zero_division=0)
+    val_f1   = f1_score(all_targets, all_preds, zero_division=0)
+    val_cm   = confusion_matrix(all_targets, all_preds)
+
     val_losses.append(val_loss)
     val_aucs.append(val_auc)
+    val_accuracies.append(val_acc)
+    val_precisions.append(val_prec)
+    val_recalls.append(val_rec)
+    val_f1s.append(val_f1)
+    val_conf_matrices.append(val_cm)
 
     print(
-        f"Epoch [{epoch:>3}/{NUM_EPOCHS}]  "
-        f"train_loss={train_loss:.4f}  train_acc={train_acc:.1f}%  "
-        f"val_loss={val_loss:.4f}  val_auc={val_auc:.4f}  "
-        f"lr={scheduler.get_last_lr()[0]:.2e}"
+        f"Epoch [{epoch:>3}/{NUM_EPOCHS}]\n"
+        f"  Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | LR: {scheduler.get_last_lr()[0]:.2e}\n"
+        f"  Val AUC: {val_auc:.4f} | Acc: {val_acc:.4f} | Prec: {val_prec:.4f} | Rec: {val_rec:.4f} | F1: {val_f1:.4f}\n"
+        f"  Confusion Matrix:\n{val_cm}"
     )
 
     # ── Save per-epoch checkpoint ──────────────────────────────────────────────
@@ -335,11 +356,16 @@ for epoch in range(start_epoch, NUM_EPOCHS + 1):
             "freeze_up_to"  : FREEZE_UP_TO,
             "num_classes"   : 2,
             "val_split"     : VAL_SPLIT,
+            "label_smoothing": LABEL_SMOOTHING,
         },
         "train_losses"     : train_losses,
-        "train_accuracies" : train_accuracies,
         "val_losses"       : val_losses,
         "val_aucs"         : val_aucs,
+        "val_conf_matrices": val_conf_matrices,
+        "val_accuracies"   : val_accuracies,
+        "val_precisions"   : val_precisions,
+        "val_recalls"      : val_recalls,
+        "val_f1s"          : val_f1s,
     }, ckpt_path)
     print(f"  └─ Checkpoint saved: {ckpt_path}")
 
@@ -350,25 +376,57 @@ print("\nTraining complete.")
 n_recorded = len(train_losses)
 epochs_x   = range(1, n_recorded + 1)
 
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-ax1.plot(epochs_x, train_losses, marker="o", linewidth=1.5, label="Train")
-ax1.plot(epochs_x, val_losses,   marker="s", linewidth=1.5, label="Val",  linestyle="--")
-ax1.set_xlabel("Epoch")
-ax1.set_ylabel("Cross-Entropy Loss")
-ax1.set_title("Loss")
-ax1.legend()
-ax1.grid(True, linestyle="--", alpha=0.6)
+# 1. Loss
+axes[0, 0].plot(epochs_x, train_losses, marker="o", linewidth=1.5, label="Train")
+axes[0, 0].plot(epochs_x, val_losses,   marker="s", linewidth=1.5, label="Val", linestyle="--")
+axes[0, 0].set_xlabel("Epoch")
+axes[0, 0].set_ylabel("Cross-Entropy Loss")
+axes[0, 0].set_title("Loss")
+axes[0, 0].legend()
+axes[0, 0].grid(True, linestyle="--", alpha=0.6)
 
-ax2.plot(epochs_x, val_aucs, marker="s", linewidth=1.5, color="tab:green", label="Val AUC")
-ax2.set_xlabel("Epoch")
-ax2.set_ylabel("ROC-AUC")
-ax2.set_ylim(0, 1)
-ax2.set_title("Validation AUC (MEL vs NV)")
-ax2.legend()
-ax2.grid(True, linestyle="--", alpha=0.6)
+# 2. AUC & Accuracy
+axes[0, 1].plot(epochs_x, val_aucs, marker="s", linewidth=1.5, color="tab:green", label="Val AUC")
+axes[0, 1].plot(epochs_x, val_accuracies, marker="^", linewidth=1.5, color="tab:blue", label="Val Acc")
+axes[0, 1].set_xlabel("Epoch")
+axes[0, 1].set_ylabel("Metric")
+axes[0, 1].set_ylim(0, 1)
+axes[0, 1].set_title("Validation AUC & Accuracy")
+axes[0, 1].legend()
+axes[0, 1].grid(True, linestyle="--", alpha=0.6)
 
-plt.suptitle("EfficientNet-B0 Fine-Tuning Curves", fontsize=13)
+# 3. Precision, Recall, F1
+axes[1, 0].plot(epochs_x, val_precisions, marker="o", linewidth=1.5, label="Precision")
+axes[1, 0].plot(epochs_x, val_recalls, marker="v", linewidth=1.5, label="Recall")
+axes[1, 0].plot(epochs_x, val_f1s, marker="d", linewidth=1.5, label="F1")
+axes[1, 0].set_xlabel("Epoch")
+axes[1, 0].set_ylabel("Metric")
+axes[1, 0].set_ylim(0, 1)
+axes[1, 0].set_title("Validation Precision, Recall, F1")
+axes[1, 0].legend()
+axes[1, 0].grid(True, linestyle="--", alpha=0.6)
+
+# 4. Final Epoch Confusion Matrix
+if n_recorded > 0:
+    cm = val_conf_matrices[-1]
+    cax = axes[1, 1].matshow(cm, cmap="Blues", alpha=0.7)
+    fig.colorbar(cax, ax=axes[1, 1])
+    for (i, j), z in np.ndenumerate(cm):
+        axes[1, 1].text(j, i, f'{z}', ha='center', va='center',
+                        color='white' if cm[i, j] > cm.max() / 2 else 'black')
+    axes[1, 1].set_xticks([0, 1])
+    axes[1, 1].set_yticks([0, 1])
+    axes[1, 1].set_xticklabels(LABEL_NAMES)
+    axes[1, 1].set_yticklabels(LABEL_NAMES)
+    axes[1, 1].set_xlabel("Predicted")
+    axes[1, 1].set_ylabel("True")
+    axes[1, 1].set_title(f"Confusion Matrix (Epoch {n_recorded})", pad=20)
+else:
+    axes[1, 1].axis('off')
+
+plt.suptitle("EfficientNet-B0 Fine-Tuning Performance", fontsize=15)
 plt.tight_layout()
 plt.show()
 
