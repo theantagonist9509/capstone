@@ -40,8 +40,8 @@ print(f"PyTorch {torch.__version__} | CUDA available: {torch.cuda.is_available()
 DATASET_DIR         = "dataset/ISIC_2018/ISIC2018_Task3_Training_Input"
 LABELS_CSV          = "dataset/ISIC_2018/ISIC2018_Task3_Training_GroundTruth.csv"
 IMAGE_SIZE          = 224          # EfficientNet-B0 default
-BATCH_SIZE          = 16
-NUM_WORKERS         = 2
+BATCH_SIZE          = 32
+NUM_WORKERS         = 4
 VAL_SPLIT           = 0.2          # fraction held out for validation
 LEARNING_RATE       = 1e-4         # lower LR appropriate for fine-tuning
 NUM_EPOCHS          = 40
@@ -533,13 +533,14 @@ best_ckpt = torch.load(existing[best_epoch_idx], map_location=DEVICE, weights_on
 model.load_state_dict(best_ckpt["model_state"])
 model.eval()
 
-print(f"Classifier: {latest[best_epoch_idx]}")
+print(f"Classifier: {existing[best_epoch_idx]}")
 print(f"    Val AUC: {best_ckpt['val_aucs'][best_epoch_idx]:.4f}")
 print(f"    Val accuracy: {best_ckpt['val_accuracies'][best_epoch_idx]:.4f}")
 print(f"    Val precision: {best_ckpt['val_precisions'][best_epoch_idx]:.4f}")
 print(f"    Val recall: {best_ckpt['val_recalls'][best_epoch_idx]:.4f}")
 print(f"    Val F1: {best_ckpt['val_f1s'][best_epoch_idx]:.4f}")
-print(f"    Val confusion matrix: {best_ckpt['val_cms'][best_epoch_idx]}")
+print(f"    Val confusion matrix:")
+print(best_ckpt['val_conf_matrices'][best_epoch_idx])
 
 # %%
 # Load best AE
@@ -588,7 +589,6 @@ ae.load_state_dict(best_ckpt["model_state"])
 ae.eval()
 
 # %%
-val_total        = 0
 all_logits       = []
 all_targets      = []   # ground-truth class indices
 
@@ -618,5 +618,8 @@ print(f"    Val accuracy: {val_acc:.4f}")
 print(f"    Val precision: {val_prec:.4f}")
 print(f"    Val recall: {val_rec:.4f}")
 print(f"    Val F1: {val_f1:.4f}")
-print(f"    Val confusion matrix: {val_cm}")
+print(f"    Val confusion matrix:")
+print(val_cm)
 
+
+# %%
