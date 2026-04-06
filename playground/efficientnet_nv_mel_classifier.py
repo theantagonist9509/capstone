@@ -6,14 +6,10 @@
 # | Detail | Value |
 # |---|---|
 # | Backbone | EfficientNet-B0 (ImageNet-pretrained) |
-# | Frozen layers | Stem + MBConv blocks 1–5 (features[0..5]); only blocks 6–8 + classifier head are trained |
 # | Input size | 224 × 224 (EfficientNet-B0 default) |
 # | Train/Val split | 80 / 20, `random_split` seeded at 42 |
 # | Class imbalance | `WeightedRandomSampler` on train split (NV greatly outnumbers MEL) |
-# | Val metric | ROC-AUC |
 # | Checkpointing | Per-epoch, auto-resume from latest `epoch_*.pth` |
-# 
-# **Freeze rationale:** EfficientNet-B0's first six feature blocks (stem conv + MBConv blocks 1–5) learn very general ImageNet features (edges, textures, simple patterns) that transfer well to dermoscopy.  The final MBConv blocks (6–8) and the classifier head are left trainable so the network can adapt its high-level representations to the MEL/NV task without over-fitting.
 
 # %%
 # ── Imports ──────────────────────────────────────────────────────────────────
@@ -41,16 +37,16 @@ print(f"PyTorch {torch.__version__} | CUDA available: {torch.cuda.is_available()
 
 # %%
 # ── Parameters (edit here) ────────────────────────────────────────────────────
-DATASET_DIR    = "../dataset/ISIC_2018/ISIC2018_Task3_Training_Input"
-LABELS_CSV     = "../dataset/ISIC_2018/ISIC2018_Task3_Training_GroundTruth.csv"
+DATASET_DIR    = "dataset/ISIC_2018/ISIC2018_Task3_Training_Input"
+LABELS_CSV     = "dataset/ISIC_2018/ISIC2018_Task3_Training_GroundTruth.csv"
 IMAGE_SIZE     = 224          # EfficientNet-B0 default
-BATCH_SIZE     = 8
-NUM_WORKERS    = 4
+BATCH_SIZE     = 16
+NUM_WORKERS    = 2
 VAL_SPLIT      = 0.2          # fraction held out for validation
 LEARNING_RATE  = 1e-4         # lower LR appropriate for fine-tuning
-NUM_EPOCHS     = 20
+NUM_EPOCHS     = 40
 LABEL_SMOOTHING= 0.3          # aggressive label smoothing
-CHECKPOINT_DIR = "../checkpoints/efficientnet_nv_mel_classifier/run_2"
+CHECKPOINT_DIR = "checkpoints/efficientnet_nv_mel_classifier/run_2"
 DEVICE         = "cuda" if torch.cuda.is_available() else "cpu"
 LABEL_NAMES    = ["NV", "MEL"]
 
@@ -185,20 +181,13 @@ plt.show()
 #   [3]  Sequential            – MBConv block stage 3
 #   [4]  Sequential            – MBConv block stage 4
 #   [5]  Sequential            – MBConv block stage 5
-#   [6]  Sequential            – MBConv block stage 6  ← trainable
-#   [7]  Sequential            – MBConv block stage 7  ← trainable
-#   [8]  Conv2dNormActivation  – head conv              ← trainable
-#
-# Freeze: features[0..5] (stem + early MBConv stages).
-# These parameters capture generic low/mid-level features (edges, colour
-# gradients, textures) from ImageNet that transfer well to dermoscopy.
-# The last three stages and the classifier head are left trainable to allow
-# the network to learn task-specific high-level representations.
+#   [6]  Sequential            – MBConv block stage 6
+#   [7]  Sequential            – MBConv block stage 7
+#   [8]  Conv2dNormActivation  – head conv
 
 backbone = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
 
-# Freeze stem + MBConv stages 1–5
-FREEZE_UP_TO = 6   # features[0..5] frozen; features[6..8] trainable
+FREEZE_UP_TO = 0 # count includes stem
 for i in range(FREEZE_UP_TO):
     for param in backbone.features[i].parameters():
         param.requires_grad = False
@@ -225,8 +214,8 @@ optimizer = torch.optim.Adam(
     filter(lambda p: p.requires_grad, model.parameters()),
     lr=LEARNING_RATE,
 )
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    optimizer, T_max=NUM_EPOCHS, eta_min=1e-6
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='min', factor=0.5, patience=2
 )
 
 # ── History buffers ───────────────────────────────────────────────────────────
@@ -293,8 +282,6 @@ for epoch in range(start_epoch, NUM_EPOCHS + 1):
         total        += imgs.size(0)
         pbar.set_postfix(loss=f"{running_loss / total:.4f}")
 
-    scheduler.step()
-
     train_loss = running_loss / total
     train_losses.append(train_loss)
 
@@ -337,9 +324,11 @@ for epoch in range(start_epoch, NUM_EPOCHS + 1):
     val_f1s.append(val_f1)
     val_conf_matrices.append(val_cm)
 
+    scheduler.step(val_loss)
+
     print(
         f"Epoch [{epoch:>3}/{NUM_EPOCHS}]\n"
-        f"  Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | LR: {scheduler.get_last_lr()[0]:.2e}\n"
+        f"  Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | LR: {optimizer.param_groups[0]['lr']:.2e}\n"
         f"  Val AUC: {val_auc:.4f} | Acc: {val_acc:.4f} | Prec: {val_prec:.4f} | Rec: {val_rec:.4f} | F1: {val_f1:.4f}\n"
         f"  Confusion Matrix:\n{val_cm}"
     )
@@ -432,7 +421,7 @@ plt.show()
 
 # %%
 # ── Collect Activation Distributions ─────────────────────────────────────────
-existing = sorted(glob.glob(os.path.join(CHECKPOINT_DIR, "epoch_*.pth")))[:10] # ONLY FIRST 10 FOR NOW!!!
+existing = sorted(glob.glob(os.path.join(CHECKPOINT_DIR, "epoch_*.pth")))
 all_probs = []
 ckpts = []
 
@@ -528,3 +517,5 @@ if all_probs:
     plt.show()
 else:
     print("No data to plot.")
+
+# %%

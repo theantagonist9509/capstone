@@ -6,14 +6,11 @@
 # | Detail | Value |
 # |---|---|
 # | Backbone | EfficientNet-B0 (ImageNet-pretrained) |
-# | Frozen layers | Stem + MBConv blocks 1–5 (features[0..5]); only blocks 6–8 are trained + custom ConvTranspose2d decoder |
 # | Input size | 224 × 224 (EfficientNet-B0 default) |
 # | Train/Val split | 80 / 20, `random_split` seeded at 42 |
 # | Class imbalance | `WeightedRandomSampler` on train split (NV greatly outnumbers MEL) |
-# | Val metric | MSE Loss |
+# | Val metric | VGG19 Perceptual Loss |
 # | Checkpointing | Per-epoch, auto-resume from latest `epoch_*.pth` |
-# 
-# **Freeze rationale:** EfficientNet-B0's first six feature blocks (stem conv + MBConv blocks 1–5) learn very general ImageNet features (edges, textures, simple patterns) that transfer well to dermoscopy.  The final MBConv blocks (6–8) and the decoder are left trainable so the network can adapt its high-level representations to the MEL/NV task without over-fitting.
 
 # %%
 # ── Imports ──────────────────────────────────────────────────────────────────
@@ -34,20 +31,21 @@ if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
 from datasets import ISIC2018Dataset, TransformDataset
+from vgg_loss import VGGLoss
 
 print(f"PyTorch {torch.__version__} | CUDA available: {torch.cuda.is_available()}")
 
 # %%
 # ── Parameters (edit here) ────────────────────────────────────────────────────
-DATASET_DIR    = "../dataset/ISIC_2018/ISIC2018_Task3_Training_Input"
-LABELS_CSV     = "../dataset/ISIC_2018/ISIC2018_Task3_Training_GroundTruth.csv"
+DATASET_DIR    = "./dataset/ISIC_2018/ISIC2018_Task3_Training_Input"
+LABELS_CSV     = "./dataset/ISIC_2018/ISIC2018_Task3_Training_GroundTruth.csv"
 IMAGE_SIZE     = 224          # EfficientNet-B0 default
 BATCH_SIZE     = 8
 NUM_WORKERS    = 4
 VAL_SPLIT      = 0.2          # fraction held out for validation
 LEARNING_RATE  = 1e-4         # lower LR appropriate for fine-tuning
 NUM_EPOCHS     = 20
-CHECKPOINT_DIR = "../checkpoints/efficientnet_nv_mel_ae"
+CHECKPOINT_DIR = "./checkpoints/efficientnet_nv_mel_ae_vgg"
 DEVICE         = "cuda" if torch.cuda.is_available() else "cpu"
 LABEL_NAMES    = ["NV", "MEL"]
 
@@ -177,13 +175,11 @@ plt.show()
 # ── Model – EfficientNet-B0 Autoencoder ───────────────────────────────────────
 #
 # EfficientNet-B0 feature extractor layout (model.features)
-# Freeze: features[0..5] (stem + early MBConv stages).
 # The decoder reconstructs the images from the 1280x7x7 feature maps.
 
 backbone = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
 
-# Freeze stem + MBConv stages 1–5
-FREEZE_UP_TO = 6   # features[0..5] frozen; features[6..8] trainable
+FREEZE_UP_TO = 0
 for i in range(FREEZE_UP_TO):
     for param in backbone.features[i].parameters():
         param.requires_grad = False
@@ -226,8 +222,8 @@ print(f"Frozen parameters   : {frozen:,}")
 print(f"Trainable parameters: {trainable:,}")
 
 # %%
-# ── Loss / optimiser / scheduler + auto-resume ────────────────────────────────
-criterion = nn.MSELoss()
+criterion = VGGLoss().to(DEVICE)
+
 # Only pass parameters that require gradients to the optimiser
 optimizer = torch.optim.Adam(
     filter(lambda p: p.requires_grad, model.parameters()),
@@ -338,10 +334,10 @@ n_recorded = len(train_losses)
 epochs_x   = range(1, n_recorded + 1)
 
 plt.figure(figsize=(8, 5))
-plt.plot(epochs_x, train_losses, marker="o", linewidth=1.5, label="Train MSE")
-plt.plot(epochs_x, val_losses,   marker="s", linewidth=1.5, label="Val MSE",  linestyle="--")
+plt.plot(epochs_x, train_losses, marker="o", linewidth=1.5, label="Train VGG P-Loss")
+plt.plot(epochs_x, val_losses,   marker="s", linewidth=1.5, label="Val VGG P-Loss",  linestyle="--")
 plt.xlabel("Epoch")
-plt.ylabel("MSE Loss")
+plt.ylabel("VGG P-Loss")
 plt.title("Autoencoder Training Curves")
 plt.legend()
 plt.grid(True, linestyle="--", alpha=0.6)
