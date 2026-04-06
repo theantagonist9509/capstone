@@ -37,18 +37,19 @@ print(f"PyTorch {torch.__version__} | CUDA available: {torch.cuda.is_available()
 
 # %%
 # ── Parameters (edit here) ────────────────────────────────────────────────────
-DATASET_DIR    = "dataset/ISIC_2018/ISIC2018_Task3_Training_Input"
-LABELS_CSV     = "dataset/ISIC_2018/ISIC2018_Task3_Training_GroundTruth.csv"
-IMAGE_SIZE     = 224          # EfficientNet-B0 default
-BATCH_SIZE     = 16
-NUM_WORKERS    = 2
-VAL_SPLIT      = 0.2          # fraction held out for validation
-LEARNING_RATE  = 1e-4         # lower LR appropriate for fine-tuning
-NUM_EPOCHS     = 40
-LABEL_SMOOTHING= 0.3          # aggressive label smoothing
-CHECKPOINT_DIR = "checkpoints/efficientnet_nv_mel_classifier/run_2"
-DEVICE         = "cuda" if torch.cuda.is_available() else "cpu"
-LABEL_NAMES    = ["NV", "MEL"]
+DATASET_DIR         = "dataset/ISIC_2018/ISIC2018_Task3_Training_Input"
+LABELS_CSV          = "dataset/ISIC_2018/ISIC2018_Task3_Training_GroundTruth.csv"
+IMAGE_SIZE          = 224          # EfficientNet-B0 default
+BATCH_SIZE          = 16
+NUM_WORKERS         = 2
+VAL_SPLIT           = 0.2          # fraction held out for validation
+LEARNING_RATE       = 1e-4         # lower LR appropriate for fine-tuning
+NUM_EPOCHS          = 40
+LABEL_SMOOTHING     = 0.3          # aggressive label smoothing
+CHECKPOINT_DIR      = "checkpoints/efficientnet_nv_mel_classifier/run_2"
+AE_CHECKPOINT_DIR   = "checkpoints/efficientnet_nv_mel_ae_vgg"
+DEVICE              = "cuda" if torch.cuda.is_available() else "cpu"
+LABEL_NAMES         = ["NV", "MEL"]
 
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
@@ -519,3 +520,103 @@ else:
     print("No data to plot.")
 
 # %%
+# Load best classifier
+
+existing = sorted(glob.glob(os.path.join(CHECKPOINT_DIR, "epoch_*.pth")))
+assert len(existing) > 0, "No classifier checkpoint found"
+
+latest = existing[-1]
+ckpt   = torch.load(latest, map_location="cpu", weights_only=False)
+best_epoch_idx = ckpt["val_losses"].index(min(ckpt["val_losses"]))
+
+best_ckpt = torch.load(existing[best_epoch_idx], map_location=DEVICE, weights_only=False)
+model.load_state_dict(best_ckpt["model_state"])
+model.eval()
+
+print(f"Classifier: {latest[best_epoch_idx]}")
+print(f"    Val AUC: {best_ckpt['val_aucs'][best_epoch_idx]:.4f}")
+print(f"    Val accuracy: {best_ckpt['val_accuracies'][best_epoch_idx]:.4f}")
+print(f"    Val precision: {best_ckpt['val_precisions'][best_epoch_idx]:.4f}")
+print(f"    Val recall: {best_ckpt['val_recalls'][best_epoch_idx]:.4f}")
+print(f"    Val F1: {best_ckpt['val_f1s'][best_epoch_idx]:.4f}")
+print(f"    Val confusion matrix: {best_ckpt['val_cms'][best_epoch_idx]}")
+
+# %%
+# Load best AE
+
+backbone = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
+
+class EfficientNetAutoencoder(nn.Module):
+    def __init__(self, encoder):
+        super().__init__()
+        self.encoder = encoder.features
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(1280, 512, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+            
+            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            
+            nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1),
+        )
+
+    def forward(self, x):
+        features = self.encoder(x)
+        return self.decoder(features)
+
+ae = EfficientNetAutoencoder(backbone).to(DEVICE)
+
+existing = sorted(glob.glob(os.path.join(AE_CHECKPOINT_DIR, "epoch_*.pth")))
+assert len(existing) > 0, "No AE checkpoint found"
+
+latest = existing[-1]
+ckpt   = torch.load(latest, map_location="cpu", weights_only=False)
+best_epoch_idx = ckpt["val_losses"].index(min(ckpt["val_losses"]))
+
+best_ckpt = torch.load(existing[best_epoch_idx], map_location=DEVICE, weights_only=False)
+ae.load_state_dict(best_ckpt["model_state"])
+ae.eval()
+
+# %%
+val_total        = 0
+all_logits       = []
+all_targets      = []   # ground-truth class indices
+
+with torch.no_grad():
+    for imgs, labels_onehot in tqdm(val_loader, desc=f"Classifier on Raw vs AE", leave=False):
+        imgs          = imgs.to(DEVICE, non_blocking=True)
+        labels_onehot = labels_onehot.to(DEVICE, non_blocking=True)
+        labels        = labels_onehot.argmax(dim=1)
+
+        recons = ae(imgs)
+        logits = model(recons).squeeze(-1)
+
+        all_logits.extend(logits.cpu().numpy())
+        all_targets.extend(labels.cpu().numpy())
+
+all_preds = (np.array(all_logits) > 0).astype(int)
+val_auc  = roc_auc_score(all_targets, all_logits)
+val_acc  = accuracy_score(all_targets, all_preds)
+val_prec = precision_score(all_targets, all_preds, zero_division=0)
+val_rec  = recall_score(all_targets, all_preds, zero_division=0)
+val_f1   = f1_score(all_targets, all_preds, zero_division=0)
+val_cm   = confusion_matrix(all_targets, all_preds)
+
+print(f"Classifier on Reconstructed Images:")
+print(f"    Val AUC: {val_auc:.4f}")
+print(f"    Val accuracy: {val_acc:.4f}")
+print(f"    Val precision: {val_prec:.4f}")
+print(f"    Val recall: {val_rec:.4f}")
+print(f"    Val F1: {val_f1:.4f}")
+print(f"    Val confusion matrix: {val_cm}")
+

@@ -382,3 +382,5 @@ for i in range(min(6, sample_imgs.size(0))):
 plt.suptitle("Autoencoder Reconstructions (Val Set)", fontsize=14)
 plt.tight_layout()
 plt.show()
+
+# %%
