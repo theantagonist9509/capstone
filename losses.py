@@ -44,8 +44,8 @@ class MS_SSIMLoss(nn.Module):
     def __init__(self, channels, denorm_mean, denorm_std):
         super().__init__()
         self.ms_ssim = MS_SSIM(data_range=1, size_average=True, channel=channels)
-        self.denorm_mean = denorm_mean.view(1, channels, 1, 1)
-        self.denorm_std = denorm_std.view(1, channels, 1, 1)
+        self.register_buffer('denorm_mean', denorm_mean.clone().view(1, channels, 1, 1))
+        self.register_buffer('denorm_std', denorm_std.clone().view(1, channels, 1, 1))
     
     def forward(self, a, b):
         denorm_a = a * self.denorm_std + self.denorm_mean

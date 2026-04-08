@@ -1,9 +1,11 @@
 # %%
+import os
+import glob
 import torch
 
 # %%
-def load_best_model(model, checkpoint_dir, key, selector, device, pattern="epoch_*.pth"):
-    """Given a directory of training checkpoints, load the best one based on given key (like "val_loss") and selector (like min)"""
+def load_best_model(model, checkpoint_dir, key, value_selector, device, pattern="epoch_*.pth"):
+    """Given a directory of training checkpoints, load the best one based on given key (like "val_loss") and value_selector (like min)"""
 
     existing = sorted(glob.glob(os.path.join(checkpoint_dir, pattern)))
     assert len(existing) > 0, "No checkpoint found"
@@ -11,7 +13,7 @@ def load_best_model(model, checkpoint_dir, key, selector, device, pattern="epoch
     if len(existing) > 1:
         latest = existing[-1]
         ckpt   = torch.load(latest, map_location="cpu", weights_only=False)
-        best_epoch_idx = ckpt[key].index(selector(ckpt[key]))
+        best_epoch_idx = ckpt[key].index(value_selector(ckpt[key]))
     else:
         best_epoch_idx = 0
 
@@ -19,5 +21,20 @@ def load_best_model(model, checkpoint_dir, key, selector, device, pattern="epoch
     model.load_state_dict(best_ckpt["model_state"])
 
     return best_ckpt
+
+# %%
+def print_checkpoint_info(ckpt):
+    for k, v in ckpt.items():
+        if "state" in k:
+            continue
+
+        if isinstance(v, dict):
+            print_checkpoint_info(v) # nested history variables
+            continue
+
+        if isinstance(v, list):
+            v = v[-1] # history variables
+        
+        print(f"{k}: {v}")
 
 # %%

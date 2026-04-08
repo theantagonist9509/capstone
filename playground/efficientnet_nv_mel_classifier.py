@@ -32,6 +32,7 @@ if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
 from datasets import ISIC2018Dataset, TransformDataset
+from models import NVMELClassifier
 
 print(f"PyTorch {torch.__version__} | CUDA available: {torch.cuda.is_available()}")
 
@@ -173,34 +174,7 @@ plt.tight_layout()
 plt.show()
 
 # %%
-# ── Model – EfficientNet-B0 with partial freezing ────────────────────────────
-#
-# EfficientNet-B0 feature extractor layout (model.features):
-#   [0]  Conv2dNormActivation  – stem (32 filters)
-#   [1]  Sequential            – MBConv block stage 1
-#   [2]  Sequential            – MBConv block stage 2
-#   [3]  Sequential            – MBConv block stage 3
-#   [4]  Sequential            – MBConv block stage 4
-#   [5]  Sequential            – MBConv block stage 5
-#   [6]  Sequential            – MBConv block stage 6
-#   [7]  Sequential            – MBConv block stage 7
-#   [8]  Conv2dNormActivation  – head conv
-
-backbone = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
-
-FREEZE_UP_TO = 0 # count includes stem
-for i in range(FREEZE_UP_TO):
-    for param in backbone.features[i].parameters():
-        param.requires_grad = False
-
-# Replace the classifier head: 1280-d → 1 (NV/MEL)
-in_features = backbone.classifier[1].in_features
-backbone.classifier = nn.Sequential(
-    nn.Dropout(p=0.4, inplace=True),
-    nn.Linear(in_features, 1),
-)
-
-model = backbone.to(DEVICE)
+model = NVMELClassifier(freeze_up_to=0).to(DEVICE)
 
 frozen   = sum(p.numel() for p in model.parameters() if not p.requires_grad)
 trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -220,33 +194,21 @@ scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
 )
 
 # ── History buffers ───────────────────────────────────────────────────────────
-train_losses     = []
-val_losses       = []
-val_aucs         = []
-val_conf_matrices= []
-val_accuracies   = []
-val_precisions   = []
-val_recalls      = []
-val_f1s          = []
-start_epoch      = 1
+start_epoch = 1
+history     = defaultdict(list)
 
 # ── Resume from latest checkpoint if one exists ───────────────────────────────
 existing = sorted(glob.glob(os.path.join(CHECKPOINT_DIR, "epoch_*.pth")))
 if existing:
     latest = existing[-1]
     ckpt   = torch.load(latest, map_location=DEVICE, weights_only=False)
+
+    start_epoch = ckpt["epoch"] + 1
+    history     = ckpt["history"]
     model.load_state_dict(ckpt["model_state"])
     optimizer.load_state_dict(ckpt["optim_state"])
     scheduler.load_state_dict(ckpt["sched_state"])
-    start_epoch      = ckpt["epoch"] + 1
-    train_losses     = ckpt.get("train_losses", [])
-    val_losses       = ckpt.get("val_losses", [])
-    val_aucs         = ckpt.get("val_aucs", [])
-    val_conf_matrices= ckpt.get("val_conf_matrices", [])
-    val_accuracies   = ckpt.get("val_accuracies", [])
-    val_precisions   = ckpt.get("val_precisions", [])
-    val_recalls      = ckpt.get("val_recalls", [])
-    val_f1s          = ckpt.get("val_f1s", [])
+
     print(f"Resumed from '{latest}' (epoch {ckpt['epoch']} of {NUM_EPOCHS})")
 else:
     print("No checkpoint found – starting from scratch.")
@@ -284,7 +246,7 @@ for epoch in range(start_epoch, NUM_EPOCHS + 1):
         pbar.set_postfix(loss=f"{running_loss / total:.4f}")
 
     train_loss = running_loss / total
-    train_losses.append(train_loss)
+    history["train_losses"].append(train_loss)
 
     # ── Validate ──────────────────────────────────────────────────────────────
     model.eval()
@@ -309,21 +271,21 @@ for epoch in range(start_epoch, NUM_EPOCHS + 1):
 
     val_loss = val_running_loss / val_total
     
-    all_preds = (np.array(all_logits) > 0).astype(int)
-    val_auc  = roc_auc_score(all_targets, all_logits)
-    val_acc  = accuracy_score(all_targets, all_preds)
-    val_prec = precision_score(all_targets, all_preds, zero_division=0)
-    val_rec  = recall_score(all_targets, all_preds, zero_division=0)
-    val_f1   = f1_score(all_targets, all_preds, zero_division=0)
-    val_cm   = confusion_matrix(all_targets, all_preds)
+    all_preds   = (np.array(all_logits) > 0).astype(int)
+    val_auc     = roc_auc_score(all_targets, all_logits)
+    val_acc     = accuracy_score(all_targets, all_preds)
+    val_prec    = precision_score(all_targets, all_preds, zero_division=0)
+    val_rec     = recall_score(all_targets, all_preds, zero_division=0)
+    val_f1      = f1_score(all_targets, all_preds, zero_division=0)
+    val_cm      = confusion_matrix(all_targets, all_preds)
 
-    val_losses.append(val_loss)
-    val_aucs.append(val_auc)
-    val_accuracies.append(val_acc)
-    val_precisions.append(val_prec)
-    val_recalls.append(val_rec)
-    val_f1s.append(val_f1)
-    val_conf_matrices.append(val_cm)
+    history["val_losses"].append(val_loss)
+    history["val_aucs"].append(val_auc)
+    history["val_accuracies"].append(val_acc)
+    history["val_precisions"].append(val_prec)
+    history["val_recalls"].append(val_rec)
+    history["val_f1s"].append(val_f1)
+    history["val_conf_matrices"].append(val_cm)
 
     scheduler.step(val_loss)
 
@@ -337,25 +299,11 @@ for epoch in range(start_epoch, NUM_EPOCHS + 1):
     # ── Save per-epoch checkpoint ──────────────────────────────────────────────
     ckpt_path = os.path.join(CHECKPOINT_DIR, f"epoch_{epoch:03d}.pth")
     torch.save({
-        "epoch"       : epoch,
-        "model_state" : model.state_dict(),
-        "optim_state" : optimizer.state_dict(),
-        "sched_state" : scheduler.state_dict(),
-        "config": {
-            "image_size"    : IMAGE_SIZE,
-            "freeze_up_to"  : FREEZE_UP_TO,
-            "num_classes"   : 2,
-            "val_split"     : VAL_SPLIT,
-            "label_smoothing": LABEL_SMOOTHING,
-        },
-        "train_losses"     : train_losses,
-        "val_losses"       : val_losses,
-        "val_aucs"         : val_aucs,
-        "val_conf_matrices": val_conf_matrices,
-        "val_accuracies"   : val_accuracies,
-        "val_precisions"   : val_precisions,
-        "val_recalls"      : val_recalls,
-        "val_f1s"          : val_f1s,
+        "epoch"         : epoch,
+        "history"       : history,
+        "model_state"   : model.state_dict(),
+        "optim_state"   : optimizer.state_dict(),
+        "sched_state"   : scheduler.state_dict(),
     }, ckpt_path)
     print(f"  └─ Checkpoint saved: {ckpt_path}")
 
@@ -518,108 +466,5 @@ if all_probs:
     plt.show()
 else:
     print("No data to plot.")
-
-# %%
-# Load best classifier
-
-existing = sorted(glob.glob(os.path.join(CHECKPOINT_DIR, "epoch_*.pth")))
-assert len(existing) > 0, "No classifier checkpoint found"
-
-latest = existing[-1]
-ckpt   = torch.load(latest, map_location="cpu", weights_only=False)
-best_epoch_idx = ckpt["val_losses"].index(min(ckpt["val_losses"]))
-
-best_ckpt = torch.load(existing[best_epoch_idx], map_location=DEVICE, weights_only=False)
-model.load_state_dict(best_ckpt["model_state"])
-model.eval()
-
-print(f"Classifier: {existing[best_epoch_idx]}")
-print(f"    Val AUC: {best_ckpt['val_aucs'][best_epoch_idx]:.4f}")
-print(f"    Val accuracy: {best_ckpt['val_accuracies'][best_epoch_idx]:.4f}")
-print(f"    Val precision: {best_ckpt['val_precisions'][best_epoch_idx]:.4f}")
-print(f"    Val recall: {best_ckpt['val_recalls'][best_epoch_idx]:.4f}")
-print(f"    Val F1: {best_ckpt['val_f1s'][best_epoch_idx]:.4f}")
-print(f"    Val confusion matrix:")
-print(best_ckpt['val_conf_matrices'][best_epoch_idx])
-
-# %%
-# Load best AE
-
-backbone = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
-
-class EfficientNetAutoencoder(nn.Module):
-    def __init__(self, encoder):
-        super().__init__()
-        self.encoder = encoder.features
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(1280, 512, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-            
-            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            
-            nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1),
-        )
-
-    def forward(self, x):
-        features = self.encoder(x)
-        return self.decoder(features)
-
-ae = EfficientNetAutoencoder(backbone).to(DEVICE)
-
-existing = sorted(glob.glob(os.path.join(AE_CHECKPOINT_DIR, "epoch_*.pth")))
-assert len(existing) > 0, "No AE checkpoint found"
-
-latest = existing[-1]
-ckpt   = torch.load(latest, map_location="cpu", weights_only=False)
-best_epoch_idx = ckpt["val_losses"].index(min(ckpt["val_losses"]))
-
-best_ckpt = torch.load(existing[best_epoch_idx], map_location=DEVICE, weights_only=False)
-ae.load_state_dict(best_ckpt["model_state"])
-ae.eval()
-
-# %%
-all_logits       = []
-all_targets      = []   # ground-truth class indices
-
-with torch.no_grad():
-    for imgs, labels_onehot in tqdm(val_loader, desc=f"Classifier on Raw vs AE", leave=False):
-        imgs          = imgs.to(DEVICE, non_blocking=True)
-        labels_onehot = labels_onehot.to(DEVICE, non_blocking=True)
-        labels        = labels_onehot.argmax(dim=1)
-
-        recons = ae(imgs)
-        logits = model(recons).squeeze(-1)
-
-        all_logits.extend(logits.cpu().numpy())
-        all_targets.extend(labels.cpu().numpy())
-
-all_preds = (np.array(all_logits) > 0).astype(int)
-val_auc  = roc_auc_score(all_targets, all_logits)
-val_acc  = accuracy_score(all_targets, all_preds)
-val_prec = precision_score(all_targets, all_preds, zero_division=0)
-val_rec  = recall_score(all_targets, all_preds, zero_division=0)
-val_f1   = f1_score(all_targets, all_preds, zero_division=0)
-val_cm   = confusion_matrix(all_targets, all_preds)
-
-print(f"Classifier on Reconstructed Images:")
-print(f"    Val AUC: {val_auc:.4f}")
-print(f"    Val accuracy: {val_acc:.4f}")
-print(f"    Val precision: {val_prec:.4f}")
-print(f"    Val recall: {val_rec:.4f}")
-print(f"    Val F1: {val_f1:.4f}")
-print(f"    Val confusion matrix:")
-print(val_cm)
-
 
 # %%
