@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
+from pytorch_msssim import MS_SSIM
 
 # %%
 class VGGLoss(nn.Module):
@@ -39,7 +40,24 @@ class VGGLoss(nn.Module):
 
         return loss
 
+class MS_SSIMLoss(nn.Module):
+    def __init__(self, channels, denorm_mean, denorm_std):
+        super().__init__()
+        self.ms_ssim = MS_SSIM(data_range=1, size_average=True, channel=channels)
+        self.denorm_mean = denorm_mean.view(1, channels, 1, 1)
+        self.denorm_std = denorm_std.view(1, channels, 1, 1)
+    
+    def forward(self, a, b):
+        denorm_a = a * self.denorm_std + self.denorm_mean
+        denorm_b = b * self.denorm_std + self.denorm_mean
+
+        denorm_a = torch.clamp(denorm_a, 0, 1)
+        denorm_b = torch.clamp(denorm_b, 0, 1)
+
+        return 1 - self.ms_ssim(denorm_a, denorm_b)
+
 # %%
+# Test VGGLoss
 if __name__ == "__main__":
     output = torch.randn(1, 3, 224, 224, requires_grad=True)
     target = torch.randn(1, 3, 224, 224)
@@ -47,10 +65,31 @@ if __name__ == "__main__":
     vgg_loss = VGGLoss()
 
     loss = vgg_loss(output, target)
-    loss
+    print(loss)
 
 # %%
     loss.backward()
-    output.grad
+    print(output.grad)
+
+# %%
+# Test MS_SSIMLoss
+if __name__ == "__main__":
+    output = torch.randn(1, 3, 224, 224, requires_grad=True)
+    target = torch.randn(1, 3, 224, 224)
+
+    imagenet_mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+    imagenet_std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+
+    norm_output = (output - imagenet_mean) / imagenet_std
+    norm_target = (target - imagenet_mean) / imagenet_std
+
+    ms_ssim_loss = MS_SSIMLoss(channels=3, denorm_mean=imagenet_mean, denorm_std=imagenet_std)
+
+    loss = ms_ssim_loss(norm_output, norm_target)
+    print(loss)
+
+# %%
+    loss.backward()
+    print(output.grad)
 
 # %%

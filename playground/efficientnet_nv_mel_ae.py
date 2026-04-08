@@ -9,7 +9,7 @@
 # | Input size | 224 × 224 (EfficientNet-B0 default) |
 # | Train/Val split | 80 / 20, `random_split` seeded at 42 |
 # | Class imbalance | `WeightedRandomSampler` on train split (NV greatly outnumbers MEL) |
-# | Val metric | VGG19 Perceptual Loss |
+# | Val metric | MS-SSIM |
 # | Checkpointing | Per-epoch, auto-resume from latest `epoch_*.pth` |
 
 # %%
@@ -31,7 +31,8 @@ if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
 from datasets import ISIC2018Dataset, TransformDataset
-from vgg_loss import VGGLoss
+from losses import MS_SSIMLoss
+from utils import load_best_model
 
 print(f"PyTorch {torch.__version__} | CUDA available: {torch.cuda.is_available()}")
 
@@ -40,7 +41,7 @@ print(f"PyTorch {torch.__version__} | CUDA available: {torch.cuda.is_available()
 DATASET_DIR    = "./dataset/ISIC_2018/ISIC2018_Task3_Training_Input"
 LABELS_CSV     = "./dataset/ISIC_2018/ISIC2018_Task3_Training_GroundTruth.csv"
 IMAGE_SIZE     = 224          # EfficientNet-B0 default
-BATCH_SIZE     = 8
+BATCH_SIZE     = 16
 NUM_WORKERS    = 4
 VAL_SPLIT      = 0.2          # fraction held out for validation
 LEARNING_RATE  = 1e-4         # lower LR appropriate for fine-tuning
@@ -59,6 +60,9 @@ print(f"Checkpoint dir: {os.path.abspath(CHECKPOINT_DIR)}")
 # ── Transforms ───────────────────────────────────────────────────────────────
 # Train: augmentations to reduce over-fitting on the small MEL class.
 # Val  : deterministic centre-crop only.
+imagenet_mean   = torch.tensor([0.485, 0.456, 0.406])
+imagenet_std    = torch.tensor([0.229, 0.224, 0.225])
+
 train_transform = transforms.Compose([
     transforms.Resize(256),
     transforms.RandomCrop(IMAGE_SIZE),
@@ -67,16 +71,14 @@ train_transform = transforms.Compose([
     # TODO: maybe add rotation by random angle as well? (also change in classifer)
     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406],   # ImageNet mean
-                         [0.229, 0.224, 0.225]),   # ImageNet std
+    transforms.Normalize(imagenet_mean, imagenet_std),
 ])
 
 val_transform = transforms.Compose([
     transforms.Resize(256),
     transforms.CenterCrop(IMAGE_SIZE),
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406],
-                         [0.229, 0.224, 0.225]),
+    transforms.Normalize(imagenet_mean, imagenet_std),
 ])
 
 print("Transform pipelines defined.")
@@ -222,7 +224,7 @@ print(f"Frozen parameters   : {frozen:,}")
 print(f"Trainable parameters: {trainable:,}")
 
 # %%
-criterion = VGGLoss().to(DEVICE)
+criterion = MS_SSIMLoss(channels=3, denorm_mean=imagenet_mean, denorm_std=imagenet_std).to(DEVICE)
 
 # Only pass parameters that require gradients to the optimiser
 optimizer = torch.optim.Adam(
@@ -343,6 +345,11 @@ plt.legend()
 plt.grid(True, linestyle="--", alpha=0.6)
 plt.tight_layout()
 plt.show()
+
+# %%
+# Load best model
+ckpt = load_best_model(model, CHECKPOINT_DIR, "val_loss", min, DEVICE)
+print(f"Best model loaded: {ckpt['epoch']}")
 
 # %%
 # ── Visualize Reconstructions ─────────────────────────────────────────────────
