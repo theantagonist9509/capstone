@@ -40,16 +40,10 @@ class TransformDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.dataset[idx]
-        if isinstance(item, tuple):
-            img, label = item
-            if self.transform is not None:
-                img = self.transform(img)
-            return img, label
-        else:
-            img = item
-            if self.transform is not None:
-                img = self.transform(img)
-            return img
+        img = item["image"]
+        if self.transform is not None:
+            img = self.transform(img)
+        return {"image": img, "label": item["label"], "id": item["id"]}
 
 
 class ISIC2020Dataset(Dataset):
@@ -143,12 +137,9 @@ class ISIC2020Dataset(Dataset):
         else:
             tensor = img
 
-        if self.label_map is not None:
-            stem = os.path.splitext(os.path.basename(img_path))[0]
-            label = self.label_map[stem]
-            return tensor, label
-
-        return tensor
+        stem = os.path.splitext(os.path.basename(img_path))[0]
+        label = self.label_map[stem] if self.label_map is not None else None
+        return {"image": tensor, "label": label, "id": stem}
 
 
 class ISIC2018Dataset(Dataset):
@@ -248,11 +239,11 @@ class ISIC2018Dataset(Dataset):
         else:
             tensor = img
 
+        stem = os.path.splitext(os.path.basename(img_path))[0]
         if self.label_map is not None:
-            stem = os.path.splitext(os.path.basename(img_path))[0]
             label = torch.tensor(
                 self.label_map.loc[stem].values, dtype=torch.float32
             )
-            return tensor, label
-
-        return tensor
+        else:
+            label = None
+        return {"image": tensor, "label": label, "id": stem}

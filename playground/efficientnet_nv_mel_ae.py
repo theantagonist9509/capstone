@@ -156,7 +156,9 @@ print(f"Val   batches/epoch : {len(val_loader)}")
 
 # %%
 # ── Sanity check: visualise a batch ──────────────────────────────────────────
-sample_imgs, sample_labels = next(iter(train_loader))
+batch = next(iter(train_loader))
+sample_imgs     = batch["image"]
+sample_labels   = batch["label"]
 print("Batch shape :", sample_imgs.shape)
 print("Labels (raw):", sample_labels[:8].tolist())
 
@@ -227,11 +229,11 @@ for epoch in range(start_epoch, NUM_EPOCHS + 1):
     total        = 0
 
     pbar = tqdm(train_loader, desc=f"Epoch [{epoch:>3}/{NUM_EPOCHS}] train", leave=False)
-    for imgs, labels_onehot in pbar:
-        imgs          = imgs.to(DEVICE, non_blocking=True)
+    for batch in pbar:
+        imgs = batch["image"].to(DEVICE, non_blocking=True)
 
         reconstructions = model(imgs)
-        loss   = criterion(reconstructions, imgs)
+        loss = criterion(reconstructions, imgs)
 
         optimizer.zero_grad()
         loss.backward()
@@ -252,11 +254,12 @@ for epoch in range(start_epoch, NUM_EPOCHS + 1):
     val_total        = 0
 
     with torch.no_grad():
-        for imgs, labels_onehot in tqdm(val_loader, desc=f"Epoch [{epoch:>3}/{NUM_EPOCHS}] val  ", leave=False):
-            imgs          = imgs.to(DEVICE, non_blocking=True)
+        for batch in tqdm(val_loader, desc=f"Epoch [{epoch:>3}/{NUM_EPOCHS}] val  ", leave=False):
+            imgs = batch["image"].to(DEVICE, non_blocking=True)
 
             reconstructions = model(imgs)
-            loss   = criterion(reconstructions, imgs)
+            loss = criterion(reconstructions, imgs)
+
             val_running_loss += loss.item() * imgs.size(0)
             val_total        += imgs.size(0)
 
@@ -306,8 +309,8 @@ print("Best model loaded:")
 print_checkpoint_info(ckpt)
 
 model.eval()
-sample_imgs, _ = next(iter(val_loader))
-sample_imgs = sample_imgs[:6].to(DEVICE)
+sample_batch = next(iter(val_loader))
+sample_imgs = sample_batch["image"][:6].to(DEVICE)
 
 with torch.no_grad():
     reconstructed = model(sample_imgs)

@@ -155,7 +155,9 @@ print(f"Val   batches/epoch : {len(val_loader)}")
 
 # %%
 # ── Sanity check: visualise a batch ──────────────────────────────────────────
-sample_imgs, sample_labels = next(iter(train_loader))
+batch = next(iter(train_loader))
+sample_imgs     = batch["image"]
+sample_labels   = batch["label"]
 print("Batch shape :", sample_imgs.shape)
 print("Labels (raw):", sample_labels[:8].tolist())
 
@@ -226,9 +228,9 @@ for epoch in range(start_epoch, NUM_EPOCHS + 1):
     total        = 0
 
     pbar = tqdm(train_loader, desc=f"Epoch [{epoch:>3}/{NUM_EPOCHS}] train", leave=False)
-    for imgs, labels_onehot in pbar:
-        imgs          = imgs.to(DEVICE, non_blocking=True)
-        labels_onehot = labels_onehot.to(DEVICE, non_blocking=True)
+    for batch in pbar:
+        imgs          = batch["image"].to(DEVICE, non_blocking=True)
+        labels_onehot = batch["label"].to(DEVICE, non_blocking=True)
         labels        = labels_onehot.argmax(dim=1).float()
 
         # Apply aggressive label smoothing
@@ -256,9 +258,9 @@ for epoch in range(start_epoch, NUM_EPOCHS + 1):
     all_targets      = []   # ground-truth class indices
 
     with torch.no_grad():
-        for imgs, labels_onehot in tqdm(val_loader, desc=f"Epoch [{epoch:>3}/{NUM_EPOCHS}] val  ", leave=False):
-            imgs          = imgs.to(DEVICE, non_blocking=True)
-            labels_onehot = labels_onehot.to(DEVICE, non_blocking=True)
+        for batch in tqdm(val_loader, desc=f"Epoch [{epoch:>3}/{NUM_EPOCHS}] val  ", leave=False):
+            imgs          = batch["image"].to(DEVICE, non_blocking=True)
+            labels_onehot = batch["label"].to(DEVICE, non_blocking=True)
             labels        = labels_onehot.argmax(dim=1)
 
             logits = model(imgs).squeeze(-1)
@@ -387,11 +389,11 @@ if existing:
             
             ckpt_probs = []
             batch_idx = 0
-            for images, labels in tqdm(val_loader, desc=f"Checkpoint {ckpt_num:03d}", leave=False):
+            for batch in tqdm(val_loader, desc=f"Checkpoint {ckpt_num:03d}", leave=False):
                 if batch_idx >= 10: # ONLY FIRST 10 FOR NOW!!!
                     break
 
-                images = images.to(DEVICE)
+                images = batch["image"].to(DEVICE)
                 outputs = model(images)
                 # Get sigmoid probabilities
                 probs = torch.sigmoid(outputs).cpu().numpy()

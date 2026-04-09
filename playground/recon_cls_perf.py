@@ -35,7 +35,7 @@ BATCH_SIZE          = 8
 NUM_WORKERS         = 2
 VAL_SPLIT           = 0.2          # fraction held out for validation
 CLS_CHECKPOINT_DIR  = "checkpoints/efficientnet_nv_mel_classifier/run_2"
-AE_CHECKPOINT_DIR   = "checkpoints/efficientnet_nv_mel_ae/run_1"
+AE_CHECKPOINT_DIR   = "checkpoints/efficientnet_nv_mel_ae_ms_ssim"
 DEVICE              = "cuda" if torch.cuda.is_available() else "cpu"
 LABEL_NAMES         = ["NV", "MEL"]
 
@@ -90,7 +90,7 @@ print(f"Val batches/epoch : {len(val_loader)}")
 # %%
 # Load best classifier
 classifier = NVMELClassifier(freeze_up_to=0).to(DEVICE)
-ckpt = load_best_model(classifier.backbone, CLS_CHECKPOINT_DIR, "val_aucs", max, DEVICE)
+ckpt = load_best_model(classifier.backbone, CLS_CHECKPOINT_DIR, lambda ckpt: np.argmax(np.array(ckpt["val_aucs"])), DEVICE)
 
 print("Classifier:")
 print_checkpoint_info(ckpt)
@@ -98,8 +98,7 @@ print_checkpoint_info(ckpt)
 # %%
 # Load best AE
 ae = NVMELAutoencoder(freeze_up_to=0).to(DEVICE)
-ckpt = load_best_model(ae, AE_CHECKPOINT_DIR, "val_losses", min, DEVICE)
-info = {k: v for k, v in ckpt.items() if "state" not in k}
+ckpt = load_best_model(ae, AE_CHECKPOINT_DIR, lambda ckpt: np.argmin(np.array(ckpt["history"]["val_losses"])), DEVICE)
 
 print("Autoencoder:")
 print_checkpoint_info(ckpt)
@@ -109,9 +108,9 @@ all_logits  = []
 all_targets = []   # ground-truth class indices
 
 with torch.no_grad():
-    for imgs, labels_onehot in tqdm(val_loader, desc=f"Classifier on Raw vs AE", leave=False):
-        imgs          = imgs.to(DEVICE, non_blocking=True)
-        labels_onehot = labels_onehot.to(DEVICE, non_blocking=True)
+    for batch in tqdm(val_loader, desc=f"Classifier on Raw vs AE", leave=False):
+        imgs          = batch["image"].to(DEVICE, non_blocking=True)
+        labels_onehot = batch["label"].to(DEVICE, non_blocking=True)
         labels        = labels_onehot.argmax(dim=1)
 
         recons = ae(imgs)
