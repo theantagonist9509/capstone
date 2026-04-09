@@ -285,12 +285,12 @@ print("\nTraining complete.")
 
 # %%
 # ── Training curves ───────────────────────────────────────────────────────────
-n_recorded = len(train_losses)
+n_recorded = len(history["train_losses"])
 epochs_x   = range(1, n_recorded + 1)
 
 plt.figure(figsize=(8, 5))
-plt.plot(epochs_x, train_losses, marker="o", linewidth=1.5, label="Train VGG P-Loss")
-plt.plot(epochs_x, val_losses,   marker="s", linewidth=1.5, label="Val VGG P-Loss",  linestyle="--")
+plt.plot(epochs_x, history["train_losses"], marker="o", linewidth=1.5, label="Train VGG P-Loss")
+plt.plot(epochs_x, history["val_losses"],   marker="s", linewidth=1.5, label="Val VGG P-Loss",  linestyle="--")
 plt.xlabel("Epoch")
 plt.ylabel("VGG P-Loss")
 plt.title("Autoencoder Training Curves")
@@ -301,8 +301,9 @@ plt.show()
 
 # %%
 # Load best model and visualize reconstructions
-ckpt = load_best_model(model, CHECKPOINT_DIR, "history", lambda history: min(history["val_losses"]), DEVICE)
-print(f"Best model loaded: {ckpt['epoch']}")
+ckpt = load_best_model(model, CHECKPOINT_DIR, lambda ckpt: np.argmin(np.array(ckpt["history"]["val_losses"])), DEVICE)
+print("Best model loaded:")
+print_checkpoint_info(ckpt)
 
 model.eval()
 sample_imgs, _ = next(iter(val_loader))

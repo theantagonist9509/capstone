@@ -4,16 +4,14 @@ import glob
 import torch
 
 # %%
-def load_best_model(model, checkpoint_dir, key, value_selector, device, pattern="epoch_*.pth"):
-    """Given a directory of training checkpoints, load the best one based on given key (like "val_loss") and value_selector (like min)"""
-
+def load_best_model(model, checkpoint_dir, index_selector, device, pattern="epoch_*.pth"):
     existing = sorted(glob.glob(os.path.join(checkpoint_dir, pattern)))
     assert len(existing) > 0, "No checkpoint found"
 
     if len(existing) > 1:
         latest = existing[-1]
         ckpt   = torch.load(latest, map_location="cpu", weights_only=False)
-        best_epoch_idx = ckpt[key].index(value_selector(ckpt[key]))
+        best_epoch_idx = index_selector(ckpt)
     else:
         best_epoch_idx = 0
 
