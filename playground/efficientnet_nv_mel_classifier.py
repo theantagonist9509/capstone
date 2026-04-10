@@ -7,12 +7,12 @@
 # |---|---|
 # | Backbone | EfficientNet-B0 (ImageNet-pretrained) |
 # | Input size | 224 × 224 (EfficientNet-B0 default) |
-# | Train/Val split | 80 / 20, `random_split` seeded at 42 |
 # | Class imbalance | `WeightedRandomSampler` on train split (NV greatly outnumbers MEL) |
 # | Checkpointing | Per-epoch, auto-resume from latest `epoch_*.pth` |
 
 # %%
 # ── Imports ──────────────────────────────────────────────────────────────────
+from collections import defaultdict
 import os
 import sys
 import glob
@@ -20,8 +20,8 @@ import math
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, WeightedRandomSampler, random_split
-from torchvision import transforms, models
+from torch.utils.data import DataLoader, WeightedRandomSampler, ConcatDataset
+from torchvision import transforms
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.metrics import roc_auc_score, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
@@ -38,19 +38,24 @@ print(f"PyTorch {torch.__version__} | CUDA available: {torch.cuda.is_available()
 
 # %%
 # ── Parameters (edit here) ────────────────────────────────────────────────────
-DATASET_DIR         = "dataset/ISIC_2018/ISIC2018_Task3_Training_Input"
-LABELS_CSV          = "dataset/ISIC_2018/ISIC2018_Task3_Training_GroundTruth.csv"
-IMAGE_SIZE          = 224          # EfficientNet-B0 default
-BATCH_SIZE          = 32
-NUM_WORKERS         = 4
-VAL_SPLIT           = 0.2          # fraction held out for validation
-LEARNING_RATE       = 1e-4         # lower LR appropriate for fine-tuning
-NUM_EPOCHS          = 40
-LABEL_SMOOTHING     = 0.3          # aggressive label smoothing
-CHECKPOINT_DIR      = "checkpoints/efficientnet_nv_mel_classifier/run_2"
-AE_CHECKPOINT_DIR   = "checkpoints/efficientnet_nv_mel_ae_vgg"
-DEVICE              = "cuda" if torch.cuda.is_available() else "cpu"
-LABEL_NAMES         = ["NV", "MEL"]
+TRAIN_ORIG_DATASET_DIR  = "dataset/ISIC_2018/ISIC2018_Task3_Training_Input"
+TRAIN_RECON_DATASET_DIR = "dataset/ISIC_2018/ISIC2018_Task3_Training_Input_Recon_MS_SSIM"
+TRAIN_LABELS_CSV        = "dataset/ISIC_2018/ISIC2018_Task3_Training_GroundTruth.csv"
+
+VAL_ORIG_DATASET_DIR    = "dataset/ISIC_2018/ISIC2018_Task3_Validation_Input"
+VAL_RECON_DATASET_DIR   = "dataset/ISIC_2018/ISIC2018_Task3_Validation_Input_Recon_MS_SSIM"
+VAL_LABELS_CSV          = "dataset/ISIC_2018/ISIC2018_Task3_Validation_GroundTruth.csv"
+
+CHECKPOINT_DIR          = "checkpoints/efficientnet_nv_mel_classifier_recon_ms_ssim"
+
+IMAGE_SIZE      = 224          # EfficientNet-B0 default
+BATCH_SIZE      = 8
+NUM_WORKERS     = 2
+LEARNING_RATE   = 1e-4         # lower LR appropriate for fine-tuning
+NUM_EPOCHS      = 15
+LABEL_SMOOTHING = 0.3          # aggressive label smoothing
+DEVICE          = "cuda" if torch.cuda.is_available() else "cpu"
+LABEL_NAMES     = ["NV", "MEL"]
 
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
@@ -85,49 +90,56 @@ print("Transform pipelines defined.")
 
 # %%
 # ── Dataset & DataLoaders ─────────────────────────────────────────────────────
-# Base dataset with transform=None so it returns raw PIL images.
-# TransformDataset wraps each split with its own augmentation pipeline.
 
-full_dataset = ISIC2018Dataset(
-    root_dir       = DATASET_DIR,
-    transform      = None,
-    labels_csv     = LABELS_CSV,
+train_orig_dataset = ISIC2018Dataset(
+    root_dir       = TRAIN_ORIG_DATASET_DIR,
+    transform      = train_transform,
+    labels_csv     = TRAIN_LABELS_CSV,
     include_labels = LABEL_NAMES,
 )
 
-print(f"Total labeled samples (NV+MEL): {len(full_dataset)}")
-
-# ── Train / Val split ─────────────────────────────────────────────────────────
-n_total = len(full_dataset)
-n_val   = int(n_total * VAL_SPLIT)
-n_train = n_total - n_val
-
-generator = torch.Generator().manual_seed(42)
-train_sub, val_sub = random_split(
-    full_dataset, [n_train, n_val], generator=generator
+train_recon_dataset = ISIC2018Dataset(
+    root_dir       = TRAIN_RECON_DATASET_DIR,
+    transform      = train_transform,
+    labels_csv     = TRAIN_LABELS_CSV,
+    include_labels = LABEL_NAMES,
 )
 
-train_dataset = TransformDataset(train_sub, train_transform)
-val_dataset   = TransformDataset(val_sub,   val_transform)
+train_dataset = ConcatDataset([train_orig_dataset, train_recon_dataset])
 
-print(f"Train samples : {len(train_dataset):,}")
-print(f"Val   samples : {len(val_dataset):,}")
+val_orig_dataset = ISIC2018Dataset(
+    root_dir       = VAL_ORIG_DATASET_DIR,
+    transform      = val_transform,
+    labels_csv     = VAL_LABELS_CSV,
+    include_labels = LABEL_NAMES,
+)
+
+val_recon_dataset = ISIC2018Dataset(
+    root_dir       = VAL_RECON_DATASET_DIR,
+    transform      = val_transform,
+    labels_csv     = VAL_LABELS_CSV,
+    include_labels = LABEL_NAMES,
+)
+
+val_dataset = ConcatDataset([val_orig_dataset, val_recon_dataset])
+
+print(f"Train dataset size: {len(train_dataset)}")
+print(f"Val dataset size:   {len(val_dataset)}")
 
 # ── Collect raw one-hot labels for WeightedRandomSampler (no image I/O) ──────
 # label_map rows are [NV, MEL]; binary label = argmax
-all_labels = [
-    int(full_dataset.label_map.loc[
+train_orig_labels = [
+    int(train_orig_dataset.label_map.loc[
         os.path.splitext(os.path.basename(p))[0]
     ].values.argmax())
-    for p in full_dataset.image_paths
+    for p in train_orig_dataset.image_paths
 ]
-class_counts = np.bincount(all_labels)
-print(f"Class counts  : NV={class_counts[0]:,}  MEL={class_counts[1]:,}")
+train_orig_class_counts = np.bincount(train_orig_labels)
+print(f"Class counts (train, original): NV={train_orig_class_counts[0]:,}  MEL={train_orig_class_counts[1]:,}")
 
 # ── WeightedRandomSampler on train split only ─────────────────────────────────
-train_labels   = [all_labels[i] for i in train_sub.indices]
-class_weights  = 1.0 / class_counts
-sample_weights = [class_weights[lbl] for lbl in train_labels]
+class_weights  = 1.0 / train_orig_class_counts
+sample_weights = [class_weights[lbl] for lbl in train_orig_labels] * 2 # original + reconstructed
 train_sampler  = WeightedRandomSampler(
     weights     = torch.DoubleTensor(sample_weights),
     num_samples = len(train_dataset),
@@ -192,7 +204,7 @@ optimizer = torch.optim.Adam(
     lr=LEARNING_RATE,
 )
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode='min', factor=0.5, patience=2
+    optimizer, mode='min', factor=0.5, patience=3, min_lr=1e-6
 )
 
 # ── History buffers ───────────────────────────────────────────────────────────

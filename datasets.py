@@ -172,13 +172,13 @@ class ISIC2018Dataset(Dataset):
     -----
     Images are loaded from disk one at a time inside ``__getitem__``, so the
     entire dataset never needs to fit in RAM.
-    Only files whose names end with ``.jpg`` or ``.jpeg`` (case-insensitive)
+    Only files whose names end with ``.jpg`` or ``.jpeg`` or ``.png`` (case-insensitive)
     are included; every other file is skipped.
     When ``include_labels`` is provided, only images that appear in the CSV
     are included in the dataset.
     """
 
-    VALID_EXTENSIONS = {".jpg", ".jpeg"}
+    VALID_EXTENSIONS = {".jpg", ".jpeg", ".png"}
     ALL_LABELS = ["MEL", "NV", "BCC", "AKIEC", "BKL", "DF", "VASC"]
 
     def __init__(
@@ -219,11 +219,11 @@ class ISIC2018Dataset(Dataset):
 
         if not self.image_paths:
             raise FileNotFoundError(
-                f"No .jpg/.jpeg files found in '{root_dir}'. "
+                f"No {self.VALID_EXTENSIONS} files found in '{root_dir}'. "
                 "Check that root_dir is correct."
             )
 
-        print(f"Found {len(self.image_paths)} valid JPEG images in '{root_dir}'")
+        print(f"Found {len(self.image_paths)} valid images in '{root_dir}'")
 
         # Build the transform pipeline
         self.transform = transform
