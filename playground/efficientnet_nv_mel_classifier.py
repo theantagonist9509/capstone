@@ -49,7 +49,7 @@ VAL_LABELS_CSV          = "dataset/ISIC_2018/ISIC2018_Task3_Validation_GroundTru
 CHECKPOINT_DIR          = "checkpoints/efficientnet_nv_mel_classifier_recon_ms_ssim"
 
 IMAGE_SIZE      = 224          # EfficientNet-B0 default
-BATCH_SIZE      = 8
+BATCH_SIZE      = 16
 NUM_WORKERS     = 2
 LEARNING_RATE   = 1e-4         # lower LR appropriate for fine-tuning
 NUM_EPOCHS      = 15
@@ -154,8 +154,16 @@ train_loader = DataLoader(
     pin_memory  = DEVICE == "cuda",
 )
 
-val_loader = DataLoader(
-    val_dataset,
+val_orig_loader = DataLoader(
+    val_orig_dataset,
+    batch_size  = BATCH_SIZE,
+    shuffle     = False,
+    num_workers = NUM_WORKERS,
+    pin_memory  = DEVICE == "cuda",
+)
+
+val_recon_loader = DataLoader(
+    val_recon_dataset,
     batch_size  = BATCH_SIZE,
     shuffle     = False,
     num_workers = NUM_WORKERS,
@@ -163,7 +171,8 @@ val_loader = DataLoader(
 )
 
 print(f"Train batches/epoch : {len(train_loader)}")
-print(f"Val   batches/epoch : {len(val_loader)}")
+print(f"Val orig  batches   : {len(val_orig_loader)}")
+print(f"Val recon batches   : {len(val_recon_loader)}")
 
 # %%
 # ── Sanity check: visualise a batch ──────────────────────────────────────────
@@ -263,51 +272,69 @@ for epoch in range(start_epoch, NUM_EPOCHS + 1):
     history["train_losses"].append(train_loss)
 
     # ── Validate ──────────────────────────────────────────────────────────────
+    def _run_val(loader, tag):
+        """Run one validation pass; return (loss, auc, acc, prec, rec, f1, cm)."""
+        running_loss = 0.0
+        total        = 0
+        logits_list  = []
+        targets_list = []
+
+        with torch.no_grad():
+            for batch in tqdm(loader, desc=f"Epoch [{epoch:>3}/{NUM_EPOCHS}] val-{tag}", leave=False):
+                imgs          = batch["image"].to(DEVICE, non_blocking=True)
+                labels_onehot = batch["label"].to(DEVICE, non_blocking=True)
+                labels        = labels_onehot.argmax(dim=1)
+
+                logits = model(imgs).squeeze(-1)
+                loss   = criterion(logits, labels.float())
+                running_loss += loss.item() * imgs.size(0)
+                total        += imgs.size(0)
+
+                logits_list.extend(logits.cpu().numpy())
+                targets_list.extend(labels.cpu().numpy())
+
+        loss_val = running_loss / total
+        preds    = (np.array(logits_list) > 0).astype(int)
+        auc      = roc_auc_score(targets_list, logits_list)
+        acc      = accuracy_score(targets_list, preds)
+        prec     = precision_score(targets_list, preds, zero_division=0)
+        rec      = recall_score(targets_list, preds, zero_division=0)
+        f1       = f1_score(targets_list, preds, zero_division=0)
+        cm       = confusion_matrix(targets_list, preds)
+        return loss_val, auc, acc, prec, rec, f1, cm
+
     model.eval()
-    val_running_loss = 0.0
-    val_total        = 0
-    all_logits       = []
-    all_targets      = []   # ground-truth class indices
+    orig_loss,  orig_auc,  orig_acc,  orig_prec,  orig_rec,  orig_f1,  orig_cm  = _run_val(val_orig_loader,  "orig")
+    recon_loss, recon_auc, recon_acc, recon_prec, recon_rec, recon_f1, recon_cm = _run_val(val_recon_loader, "recon")
 
-    with torch.no_grad():
-        for batch in tqdm(val_loader, desc=f"Epoch [{epoch:>3}/{NUM_EPOCHS}] val  ", leave=False):
-            imgs          = batch["image"].to(DEVICE, non_blocking=True)
-            labels_onehot = batch["label"].to(DEVICE, non_blocking=True)
-            labels        = labels_onehot.argmax(dim=1)
+    # averaged loss for the LR scheduler
+    val_loss = (orig_loss + recon_loss) / 2
 
-            logits = model(imgs).squeeze(-1)
-            loss   = criterion(logits, labels.float())
-            val_running_loss += loss.item() * imgs.size(0)
-            val_total        += imgs.size(0)
+    history["val_orig_losses"].append(orig_loss)
+    history["val_orig_aucs"].append(orig_auc)
+    history["val_orig_accuracies"].append(orig_acc)
+    history["val_orig_precisions"].append(orig_prec)
+    history["val_orig_recalls"].append(orig_rec)
+    history["val_orig_f1s"].append(orig_f1)
+    history["val_orig_conf_matrices"].append(orig_cm)
 
-            all_logits.extend(logits.cpu().numpy())
-            all_targets.extend(labels.cpu().numpy())
-
-    val_loss = val_running_loss / val_total
-    
-    all_preds   = (np.array(all_logits) > 0).astype(int)
-    val_auc     = roc_auc_score(all_targets, all_logits)
-    val_acc     = accuracy_score(all_targets, all_preds)
-    val_prec    = precision_score(all_targets, all_preds, zero_division=0)
-    val_rec     = recall_score(all_targets, all_preds, zero_division=0)
-    val_f1      = f1_score(all_targets, all_preds, zero_division=0)
-    val_cm      = confusion_matrix(all_targets, all_preds)
-
-    history["val_losses"].append(val_loss)
-    history["val_aucs"].append(val_auc)
-    history["val_accuracies"].append(val_acc)
-    history["val_precisions"].append(val_prec)
-    history["val_recalls"].append(val_rec)
-    history["val_f1s"].append(val_f1)
-    history["val_conf_matrices"].append(val_cm)
+    history["val_recon_losses"].append(recon_loss)
+    history["val_recon_aucs"].append(recon_auc)
+    history["val_recon_accuracies"].append(recon_acc)
+    history["val_recon_precisions"].append(recon_prec)
+    history["val_recon_recalls"].append(recon_rec)
+    history["val_recon_f1s"].append(recon_f1)
+    history["val_recon_conf_matrices"].append(recon_cm)
 
     scheduler.step(val_loss)
 
     print(
         f"Epoch [{epoch:>3}/{NUM_EPOCHS}]\n"
-        f"  Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | LR: {optimizer.param_groups[0]['lr']:.2e}\n"
-        f"  Val AUC: {val_auc:.4f} | Acc: {val_acc:.4f} | Prec: {val_prec:.4f} | Rec: {val_rec:.4f} | F1: {val_f1:.4f}\n"
-        f"  Confusion Matrix:\n{val_cm}"
+        f"  Train Loss  : {train_loss:.4f} | LR: {optimizer.param_groups[0]['lr']:.2e}\n"
+        f"  [orig ] Loss: {orig_loss:.4f}  | AUC: {orig_auc:.4f}  | Acc: {orig_acc:.4f}  | Prec: {orig_prec:.4f}  | Rec: {orig_rec:.4f}  | F1: {orig_f1:.4f}\n"
+        f"  [orig ] CM:\n{orig_cm}\n"
+        f"  [recon] Loss: {recon_loss:.4f}  | AUC: {recon_auc:.4f}  | Acc: {recon_acc:.4f}  | Prec: {recon_prec:.4f}  | Rec: {recon_rec:.4f}  | F1: {recon_f1:.4f}\n"
+        f"  [recon] CM:\n{recon_cm}"
     )
 
     # ── Save per-epoch checkpoint ──────────────────────────────────────────────

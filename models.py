@@ -30,9 +30,12 @@ class NVMELClassifier(nn.Module):
 
         # Replace the classifier head: 1280-d → 1 (NV/MEL)
         in_features = self.backbone.classifier[1].in_features
+        dropout_rate = 0.4
         self.backbone.classifier = nn.Sequential(
-            nn.Dropout(p=0.4, inplace=True),
-            nn.Linear(in_features, 1),
+            nn.Dropout(p=dropout_rate, inplace=True),
+            nn.Linear(in_features, int(0.5 * dropout_rate * in_features)),
+            nn.SiLU(inplace=True),
+            nn.Linear(int(0.5 * dropout_rate * in_features), 1),
         )
 
     def forward(self, x):
@@ -75,5 +78,93 @@ class NVMELAutoencoder(nn.Module):
     def forward(self, x):
         features = self.encoder(x)
         return self.decoder(features)
+
+
+# %%
+# ── Model – EfficientNet-B0 VAE ───────────────────────────────────────────────
+#
+# Encoder: EfficientNet-B0 backbone.features → (B, 1280, 7, 7)
+# Latent:  Two 1×1 conv heads → mu (B, latent_dim, 7, 7)
+#                                log_var (B, latent_dim, 7, 7)
+# Decoder: Symmetric ConvTranspose2d stack → (B, 3, 224, 224)
+#
+# forward() returns (recon, mu, log_var) so the training loop can compute:
+#   loss = reconstruction_loss + β * KL_loss
+#   KL   = -0.5 * mean(1 + log_var - mu² - exp(log_var))
+
+class NVMELVAE(nn.Module):
+    def __init__(self, freeze_up_to: int = 0, latent_dim: int = 256):
+        """
+        Args:
+            freeze_up_to: freeze backbone.features[0..freeze_up_to-1] (same
+                          convention as NVMELAutoencoder).
+            latent_dim:   number of channels in the spatial latent map
+                          (B, latent_dim, 7, 7).
+        """
+        super().__init__()
+
+        backbone = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
+        for i in range(freeze_up_to):
+            for param in backbone.features[i].parameters():
+                param.requires_grad = False
+
+        # ── Encoder ──────────────────────────────────────────────────────────
+        self.encoder = backbone.features
+        # output shape: (B, 1280, 7, 7) for 224×224 input
+
+        # ── Latent projections ────────────────────────────────────────────────
+        self.fc_mu      = nn.Conv2d(1280, latent_dim, kernel_size=1)
+        self.fc_log_var = nn.Conv2d(1280, latent_dim, kernel_size=1)
+
+        # ── Decoder ───────────────────────────────────────────────────────────
+        # Mirrors the NVMELAutoencoder decoder, reading from latent_dim channels
+        self.decoder = nn.Sequential(
+            # 7 → 14
+            nn.ConvTranspose2d(latent_dim, 512, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+
+            # 14 → 28
+            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+
+            # 28 → 56
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+
+            # 56 → 112
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+
+            # 112 → 224
+            nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1),
+            nn.Sigmoid(),   # output in [0, 1] — drop if inputs are normalised
+        )
+
+    # ── Reparameterisation trick ──────────────────────────────────────────────
+    def reparameterise(self, mu: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
+        if self.training:
+            std = torch.exp(0.5 * log_var)
+            eps = torch.randn_like(std)
+            return mu + eps * std
+        # at inference time just return the mean
+        return mu
+
+    def forward(self, x: torch.Tensor):
+        """
+        Returns:
+            recon   – reconstructed image  (B, 3, H, W)
+            mu      – latent mean          (B, latent_dim, 7, 7)
+            log_var – latent log-variance  (B, latent_dim, 7, 7)
+        """
+        features = self.encoder(x)          # (B, 1280, 7, 7)
+        mu      = self.fc_mu(features)      # (B, latent_dim, 7, 7)
+        log_var = self.fc_log_var(features) # (B, latent_dim, 7, 7)
+        z       = self.reparameterise(mu, log_var)
+        recon   = self.decoder(z)           # (B, 3, 224, 224)
+        return recon, mu, log_var
 
 # %%
