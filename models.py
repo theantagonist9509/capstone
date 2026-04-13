@@ -33,9 +33,7 @@ class NVMELClassifier(nn.Module):
         dropout_rate = 0.4
         self.backbone.classifier = nn.Sequential(
             nn.Dropout(p=dropout_rate, inplace=True),
-            nn.Linear(in_features, int(0.5 * dropout_rate * in_features)),
-            nn.SiLU(inplace=True),
-            nn.Linear(int(0.5 * dropout_rate * in_features), 1),
+            nn.Linear(in_features, 1),
         )
 
     def forward(self, x):
@@ -93,7 +91,7 @@ class NVMELAutoencoder(nn.Module):
 #   KL   = -0.5 * mean(1 + log_var - mu² - exp(log_var))
 
 class NVMELVAE(nn.Module):
-    def __init__(self, freeze_up_to: int = 0, latent_dim: int = 256):
+    def __init__(self, freeze_up_to: int = 0, latent_dim: int = 1024):
         """
         Args:
             freeze_up_to: freeze backbone.features[0..freeze_up_to-1] (same

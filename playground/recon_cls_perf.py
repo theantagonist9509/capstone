@@ -108,7 +108,7 @@ all_logits  = []
 all_targets = []   # ground-truth class indices
 
 with torch.no_grad():
-    for batch in tqdm(val_loader, desc=f"Classifier on Raw vs AE", leave=False):
+    for batch in tqdm(val_loader, desc=f"Classifier AE Reconstructions", leave=False):
         imgs          = batch["image"].to(DEVICE, non_blocking=True)
         labels_onehot = batch["label"].to(DEVICE, non_blocking=True)
         labels        = labels_onehot.argmax(dim=1)
