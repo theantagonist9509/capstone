@@ -52,7 +52,7 @@ IMAGE_SIZE      = 224          # EfficientNet-B0 default
 BATCH_SIZE      = 16
 NUM_WORKERS     = 2
 LEARNING_RATE   = 1e-4         # lower LR appropriate for fine-tuning
-NUM_EPOCHS      = 15
+NUM_EPOCHS      = 30
 LABEL_SMOOTHING = 0.3          # aggressive label smoothing
 DEVICE          = "cuda" if torch.cuda.is_available() else "cpu"
 LABEL_NAMES     = ["NV", "MEL"]
@@ -352,58 +352,50 @@ print("\nTraining complete.")
 
 # %%
 # ── Training curves ───────────────────────────────────────────────────────────
-n_recorded = len(train_losses)
+legacy_run_epochs = len(history["val_losses"])
+history["train_losses"] = history["train_losses"][legacy_run_epochs:]
+
+# %%
+n_recorded = len(history["train_losses"])
 epochs_x   = range(1, n_recorded + 1)
 
-fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+# Use subplots to create a 3x1 grid. Added figsize to give the plots vertical space.
+fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 12))
 
 # 1. Loss
-axes[0, 0].plot(epochs_x, train_losses, marker="o", linewidth=1.5, label="Train")
-axes[0, 0].plot(epochs_x, val_losses,   marker="s", linewidth=1.5, label="Val", linestyle="--")
-axes[0, 0].set_xlabel("Epoch")
-axes[0, 0].set_ylabel("Cross-Entropy Loss")
-axes[0, 0].set_title("Loss")
-axes[0, 0].legend()
-axes[0, 0].grid(True, linestyle="--", alpha=0.6)
+ax1.plot(epochs_x, history["train_losses"], marker="o", linewidth=1.5, label="Train")
+ax1.plot(epochs_x, history["val_orig_losses"],   marker="s", linewidth=1.5, label="Val orig", linestyle="--")
+ax1.plot(epochs_x, history["val_recon_losses"],   marker="s", linewidth=1.5, label="Val recon", linestyle="--")
+ax1.set_xlabel("Epoch")
+ax1.set_ylabel("Cross-Entropy Loss")
+ax1.set_title("Loss")
+ax1.legend()
+ax1.grid(True, linestyle="--", alpha=0.6)
 
 # 2. AUC & Accuracy
-axes[0, 1].plot(epochs_x, val_aucs, marker="s", linewidth=1.5, color="tab:green", label="Val AUC")
-axes[0, 1].plot(epochs_x, val_accuracies, marker="^", linewidth=1.5, color="tab:blue", label="Val Acc")
-axes[0, 1].set_xlabel("Epoch")
-axes[0, 1].set_ylabel("Metric")
-axes[0, 1].set_ylim(0, 1)
-axes[0, 1].set_title("Validation AUC & Accuracy")
-axes[0, 1].legend()
-axes[0, 1].grid(True, linestyle="--", alpha=0.6)
+ax2.plot(epochs_x, history["val_orig_aucs"], marker="s", linewidth=1.5, color="tab:green", label="Val orig AUC")
+ax2.plot(epochs_x, history["val_recon_aucs"], marker="^", linewidth=1.5, color="tab:blue", label="Val recon AUC")
+ax2.set_xlabel("Epoch")
+ax2.set_ylabel("Metric")
+ax2.set_ylim(0, 1)
+ax2.set_title("Validation AUC & Accuracy")
+ax2.legend()
+ax2.grid(True, linestyle="--", alpha=0.6)
 
 # 3. Precision, Recall, F1
-axes[1, 0].plot(epochs_x, val_precisions, marker="o", linewidth=1.5, label="Precision")
-axes[1, 0].plot(epochs_x, val_recalls, marker="v", linewidth=1.5, label="Recall")
-axes[1, 0].plot(epochs_x, val_f1s, marker="d", linewidth=1.5, label="F1")
-axes[1, 0].set_xlabel("Epoch")
-axes[1, 0].set_ylabel("Metric")
-axes[1, 0].set_ylim(0, 1)
-axes[1, 0].set_title("Validation Precision, Recall, F1")
-axes[1, 0].legend()
-axes[1, 0].grid(True, linestyle="--", alpha=0.6)
-
-# 4. Final Epoch Confusion Matrix
-if n_recorded > 0:
-    cm = val_conf_matrices[-1]
-    cax = axes[1, 1].matshow(cm, cmap="Blues", alpha=0.7)
-    fig.colorbar(cax, ax=axes[1, 1])
-    for (i, j), z in np.ndenumerate(cm):
-        axes[1, 1].text(j, i, f'{z}', ha='center', va='center',
-                        color='white' if cm[i, j] > cm.max() / 2 else 'black')
-    axes[1, 1].set_xticks([0, 1])
-    axes[1, 1].set_yticks([0, 1])
-    axes[1, 1].set_xticklabels(LABEL_NAMES)
-    axes[1, 1].set_yticklabels(LABEL_NAMES)
-    axes[1, 1].set_xlabel("Predicted")
-    axes[1, 1].set_ylabel("True")
-    axes[1, 1].set_title(f"Confusion Matrix (Epoch {n_recorded})", pad=20)
-else:
-    axes[1, 1].axis('off')
+# Fixed labels to separate 'orig' and 'recon' metrics
+ax3.plot(epochs_x, history["val_orig_precisions"], marker="o", linewidth=1.5, label="Val orig Precision")
+ax3.plot(epochs_x, history["val_recon_precisions"], marker="v", linewidth=1.5, label="Val recon Precision")
+ax3.plot(epochs_x, history["val_orig_recalls"], marker="o", linewidth=1.5, label="Val orig Recall")
+ax3.plot(epochs_x, history["val_recon_recalls"], marker="v", linewidth=1.5, label="Val recon Recall")
+ax3.plot(epochs_x, history["val_orig_f1s"], marker="d", linewidth=1.5, label="Val orig F1")
+ax3.plot(epochs_x, history["val_recon_f1s"], marker="d", linewidth=1.5, label="Val recon F1")
+ax3.set_xlabel("Epoch")
+ax3.set_ylabel("Metric")
+ax3.set_ylim(0, 1)
+ax3.set_title("Validation Precision, Recall, F1")
+ax3.legend()
+ax3.grid(True, linestyle="--", alpha=0.6)
 
 plt.suptitle("EfficientNet-B0 Fine-Tuning Performance", fontsize=15)
 plt.tight_layout()

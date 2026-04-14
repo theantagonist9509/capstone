@@ -147,49 +147,32 @@ def _recon_grad(z: torch.Tensor) -> torch.Tensor:
     return z_.grad.clone()
 
 
-def _step_direction(z: torch.Tensor, orthogonal: bool) -> tuple[torch.Tensor, float]:
-    """
-    Returns (step, grad_norm) where step is the direction to move in latent space
-    and grad_norm is the L2 norm of the raw classifier gradient G (before projection).
-      - orthogonal=False: step = G
-      - orthogonal=True : step = component of G orthogonal to V = d(err)/dz
-    """
-    G, _, _ = _classifier_grad(z)
-    grad_norm = G.norm().item()
-    if not orthogonal:
-        return G, grad_norm
-
-    V = _recon_grad(z)
-    G_flat, V_flat = G.view(-1), V.view(-1)
-    V_norm_sq = (V_flat * V_flat).sum()
-    if V_norm_sq.item() > 1e-12:
-        G_flat = G_flat - (G_flat @ V_flat) / V_norm_sq * V_flat
-    return G_flat.view_as(G), grad_norm
-
-
 def extrapolate_image(
     img_tensor,
     actual_label_onehot,
     steps: int = 30,
-    alpha: float = 1.0,
-    min_step_size: float = 1e-3,
+    optimizer_cls=torch.optim.Adam,
+    optimizer_kwargs=None,
     orthogonal: bool = False,
     target_prob: float = 0.75,
 ):
     """
-    Traverse the latent space by following the (optionally orthogonally projected)
-    classifier gradient wrt the AE latent z.
+    Traverse the latent space by optimizing the latent vector z using a
+    configurable PyTorch optimizer to extremize the classifier logit.
 
     Critically, the gradient is **recomputed at every step** so the direction
     tracks the local manifold geometry — important for a vanilla AE whose latent
     space has no smoothness incentive between in-distribution points.
 
-    orthogonal=True: step direction is the component of G = d(logit)/dz that is
-    perpendicular to V = d(err)/dz, where err = MS_SSIMLoss(recon, recon') and
-    recon' = decoder(encoder(recon)).  This preserves reconstruction fidelity.
+    orthogonal=True: Before applying the optimizer step, the gradient of the logit 
+    is orthogonally projected relative to V = d(err)/dz, where err = MS_SSIMLoss(recon, recon').
+    This preserves reconstruction fidelity.
 
-    Returns (traversal_images, traversal_probs, traversal_recon_errors).
+    Returns (traversal_images, traversal_probs, traversal_recon_errors, traversal_grad_norms).
     """
+    if optimizer_kwargs is None:
+        optimizer_kwargs = {"lr": 0.05}
+
     tag        = "[Orthogonal]" if orthogonal else "[Raw]"
     actual_idx = actual_label_onehot.argmax(dim=1).item()
     img_tensor = img_tensor.to(DEVICE)
@@ -223,15 +206,33 @@ def extrapolate_image(
     traversal_recon_errors = [_recon_error(x_recon_0)]
     traversal_grad_norms   = [grad_norm_initial]
 
-    current_z = z_initial.clone()
+    current_z = z_initial.detach().clone()
+    current_z.requires_grad = True
+
+    optimizer = optimizer_cls([current_z], **optimizer_kwargs)
 
     for i in range(1, steps + 1):
-        # Recompute direction at current latent (adapts to local manifold).
-        # Step size is alpha / |G|: inversely proportional to gradient magnitude
-        # so we take equal-length steps in latent space regardless of |G|.
-        step, grad_norm_step = _step_direction(current_z, orthogonal)
-        unit_step = step / (step.norm() + 1e-12)
-        current_z = current_z + direction * max(min_step_size, alpha / (grad_norm_step + 1e-12)) * unit_step
+        optimizer.zero_grad()
+
+        # Compute logit for current_z
+        logit = classifier_model(ae_model.decoder(current_z)).squeeze(-1)
+        
+        # We want logit to go UP if direction == 1, reducing the loss -logit.
+        # We want logit to go DOWN if direction == -1, reducing the loss logit.
+        loss = -direction * logit
+        loss.backward()
+
+        grad_norm_step = current_z.grad.norm().item()
+
+        if orthogonal:
+            V = _recon_grad(current_z)
+            G_flat, V_flat = current_z.grad.view(-1), V.view(-1)
+            V_norm_sq = (V_flat * V_flat).sum()
+            if V_norm_sq.item() > 1e-12:
+                G_flat = G_flat - (G_flat @ V_flat) / V_norm_sq * V_flat
+            current_z.grad = G_flat.view_as(current_z.grad)
+
+        optimizer.step()
 
         with torch.no_grad():
             x_recon_step = ae_model.decoder(current_z)
@@ -244,8 +245,6 @@ def extrapolate_image(
         traversal_grad_norms.append(grad_norm_step)
 
         # Stop when prob has moved far enough past the decision boundary:
-        # if we started as NV (prob < 0.5) we stop at prob > target_prob,
-        # if we started as MEL (prob > 0.5) we stop at prob < 1 - target_prob.
         flip_threshold = target_prob if pred_initial_idx == 0 else 1.0 - target_prob
         flipped = (pred_initial_idx == 0 and prob_step >= flip_threshold) or \
                   (pred_initial_idx == 1 and prob_step <= flip_threshold)
