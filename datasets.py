@@ -170,8 +170,9 @@ class ISIC2018Dataset(Dataset):
 
     Notes
     -----
-    Images are loaded from disk one at a time inside ``__getitem__``, so the
-    entire dataset never needs to fit in RAM.
+    If ``load_into_memory`` is False (default), images are loaded from disk one at a
+    time inside ``__getitem__``, so the entire dataset never needs to fit in RAM.
+    If True, all images are loaded into RAM during initialization.
     Only files whose names end with ``.jpg`` or ``.jpeg`` or ``.png`` (case-insensitive)
     are included; every other file is skipped.
     When ``include_labels`` is provided, only images that appear in the CSV
@@ -187,6 +188,7 @@ class ISIC2018Dataset(Dataset):
         transform=None,
         labels_csv: str = None,
         include_labels: list = [],
+        load_into_memory: bool = False,
     ):
         self.root_dir = root_dir
 
@@ -228,12 +230,23 @@ class ISIC2018Dataset(Dataset):
         # Build the transform pipeline
         self.transform = transform
 
+        self.load_into_memory = load_into_memory
+        self.images = None
+        if self.load_into_memory:
+            print("Loading images into memory...")
+            self.images = [Image.open(path).convert("RGB") for path in self.image_paths]
+            print("Done loading images into memory.")
+
     def __len__(self):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
         img_path = self.image_paths[idx]
-        img = Image.open(img_path).convert("RGB")
+        if self.load_into_memory:
+            img = self.images[idx]
+        else:
+            img = Image.open(img_path).convert("RGB")
+
         if self.transform is not None:
             tensor = self.transform(img)
         else:
