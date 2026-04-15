@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 
-parent_dir = os.path.abspath(os.path.join(os.getcwd(), ".."))
+parent_dir = os.path.abspath(os.path.join(os.getcwd(), "."))
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
@@ -22,13 +22,14 @@ from losses import MS_SSIMLoss
 # %%
 # ── Setup & Parameters ────────────────────────────────────────────────────────
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+INTERACTIVE = "--interactive" in sys.argv
 print(f"Using device: {DEVICE}")
 
 VAL_ORIG_DATASET_DIR = "dataset/ISIC_2018/ISIC2018_Task3_Validation_Input"
 VAL_LABELS_CSV       = "dataset/ISIC_2018/ISIC2018_Task3_Validation_GroundTruth.csv"
 
 AE_CHECKPOINT_DIR  = "checkpoints/efficientnet_nv_mel_ae_ms_ssim"
-CLS_CHECKPOINT_DIR = "checkpoints/efficientnet_nv_mel_classifier/run_2"
+CLS_CHECKPOINT_DIR = "checkpoints/efficientnet_nv_mel_classifier_recon_ms_ssim"
 
 IMAGE_SIZE  = 224
 LABEL_NAMES = ["NV", "MEL"]
@@ -69,9 +70,9 @@ print_checkpoint_info(ae_ckpt)
 
 classifier_model = NVMELClassifier(freeze_up_to=0).to(DEVICE)
 cls_ckpt = load_best_model(
-    classifier_model.backbone,
+    classifier_model,
     CLS_CHECKPOINT_DIR,
-    index_selector=lambda ckpt: int(np.argmax(ckpt["val_aucs"])),
+    index_selector=lambda ckpt: int(np.argmax(ckpt["history"]["val_recon_f1s"])),
     device=DEVICE,
 )
 print("\nClassifier checkpoint info:")
@@ -254,21 +255,115 @@ def extrapolate_image(
 
     return traversal_images, traversal_probs, traversal_recon_errors, traversal_grad_norms
 
-
 # %%
 # ── Run Traversals ────────────────────────────────────────────────────────────
-results = {}   # (label_name, k) -> (imgs, probs, errs, gnorms)
 
-for lbl_idx, label_name in enumerate(LABEL_NAMES):
-    for k, (img, lbl) in enumerate(chosen_imgs[lbl_idx]):
-        results[(label_name, k)] = extrapolate_image(img, lbl, orthogonal=False)
+if INTERACTIVE:
+    import gradio as gr
+    def launch_gradio_app():
+        with gr.Blocks() as demo:
+            gr.Markdown("# Latent Traversal Interactive Interface")
+            
+            current_z_state = gr.State(None)
+            current_img_state = gr.State(None)
+            
+            with gr.Tab("Pick Image"):
+                img_index = gr.Slider(0, len(val_orig_dataset) - 1, step=1, label="Image Index", value=0)
+                btn_load = gr.Button("Load Image")
+                img_display = gr.Image(label="Selected Image")
+                lbl_display = gr.Textbox(label="Label")
+                btn_start = gr.Button("Start Traversal")
+                
+                def load_image(idx):
+                    item = val_orig_dataset[idx]
+                    img_t = item["image"]
+                    lbl_t = item["label"]
+                    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+                    std  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+                    img_disp = (img_t * std + mean).clamp(0, 1).permute(1, 2, 0).numpy()
+                    lbl_idx = lbl_t.argmax().item()
+                    return img_disp, f"Class: {LABEL_NAMES[lbl_idx]}", img_t.unsqueeze(0)
+                    
+                btn_load.click(load_image, inputs=[img_index], outputs=[img_display, lbl_display, current_img_state])
+                
+            with gr.Tab("Traverse"):
+                with gr.Row():
+                    btn_step_mel = gr.Button("Step Towards MEL (Gradient IN)")
+                    btn_step_nv = gr.Button("Step Towards NV (Gradient AGAINST)")
+                
+                with gr.Row():
+                    chk_orthogonal = gr.Checkbox(label="Orthogonal", value=False)
+                    lr_slider = gr.Slider(0.001, 10.0, value=1.0, label="Learning Rate (SGD)")
+                    
+                out_img = gr.Image(label="Reconstructed Image")
+                out_info = gr.Textbox(label="Current Info")
+                
+                def start_traversal(img_t):
+                    if img_t is None:
+                        return None, "Please select an image first.", None
+                    
+                    img_t = img_t.to(DEVICE)
+                    with torch.no_grad():
+                        z_initial = ae_model.encoder(img_t)
+                        x_recon = ae_model.decoder(z_initial)
+                    
+                    logit = classifier_model(x_recon).squeeze(-1)
+                    prob = torch.sigmoid(logit).item()
+                    err = _recon_error(x_recon)
+                    
+                    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).to(DEVICE)
+                    std  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).to(DEVICE)
+                    sq_disp = (x_recon[0] * std + mean).clamp(0, 1).permute(1, 2, 0).cpu().numpy()
+                    
+                    return sq_disp, f"Prob MEL: {prob:.4f} | Recon Err: {err:.4f}", z_initial.detach()
+                    
+                btn_start.click(start_traversal, inputs=[current_img_state], outputs=[out_img, out_info, current_z_state])
+                
+                def take_step(z, lr, orthogonal, direction_mode):
+                    if z is None:
+                        return None, "Please start traversal first.", None
+                    
+                    z_ = z.detach().clone().requires_grad_(True)
+                    logit = classifier_model(ae_model.decoder(z_)).squeeze(-1)
+                    loss = -direction_mode * logit
+                    loss.backward()
+                    
+                    g = z_.grad.clone()
+                    if orthogonal:
+                        V = _recon_grad(z_)
+                        g_flat, V_flat = g.view(-1), V.view(-1)
+                        V_norm_sq = (V_flat * V_flat).sum()
+                        if V_norm_sq.item() > 1e-12:
+                            g_flat = g_flat - (g_flat @ V_flat) / V_norm_sq * V_flat
+                        g = g_flat.view_as(g)
+                        
+                    new_z = z_.detach() - lr * g
+                    
+                    with torch.no_grad():
+                        x_recon = ae_model.decoder(new_z)
+                        new_logit = classifier_model(x_recon).squeeze(-1)
+                        prob = torch.sigmoid(new_logit).item()
+                        err = _recon_error(x_recon)
+                        
+                    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).to(DEVICE)
+                    std  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).to(DEVICE)
+                    sq_disp = (x_recon[0] * std + mean).clamp(0, 1).permute(1, 2, 0).cpu().numpy()
+                    
+                    return sq_disp, f"Prob MEL: {prob:.4f} | Recon Err: {err:.4f}", new_z
+                    
+                btn_step_mel.click(take_step, inputs=[current_z_state, lr_slider, chk_orthogonal, gr.State(1.0)], outputs=[out_img, out_info, current_z_state])
+                btn_step_nv.click(take_step, inputs=[current_z_state, lr_slider, chk_orthogonal, gr.State(-1.0)], outputs=[out_img, out_info, current_z_state])
 
+        demo.launch(server_name="0.0.0.0", share=False)
+            
+    launch_gradio_app()
+    import sys
+    sys.exit(0)
 
 # %%
 # ── Visualization ─────────────────────────────────────────────────────────────
 mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
 std  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-
 
 def plot_traversal(images, probs, recon_errors, grad_norms, title="Latent Traversal"):
     n_imgs = len(images)
@@ -351,8 +446,14 @@ def plot_traversal(images, probs, recon_errors, grad_norms, title="Latent Traver
     plt.tight_layout()
     plt.show()
 
+if not INTERACTIVE:
+    results = {}   # (label_name, k) -> (imgs, probs, errs, gnorms)
 
-for (label_name, k), (imgs, probs, errs, gnorms) in results.items():
-    plot_traversal(imgs, probs, errs, gnorms, title=f"Traversal {label_name} #{k+1}")
+    for lbl_idx, label_name in enumerate(LABEL_NAMES):
+        for k, (img, lbl) in enumerate(chosen_imgs[lbl_idx]):
+            results[(label_name, k)] = extrapolate_image(img, lbl, orthogonal=False)
+
+    for (label_name, k), (imgs, probs, errs, gnorms) in results.items():
+        plot_traversal(imgs, probs, errs, gnorms, title=f"Traversal {label_name} #{k+1}")
 
 # %%

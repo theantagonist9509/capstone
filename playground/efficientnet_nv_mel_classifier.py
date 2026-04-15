@@ -49,10 +49,10 @@ VAL_LABELS_CSV          = "dataset/ISIC_2018/ISIC2018_Task3_Validation_GroundTru
 CHECKPOINT_DIR          = "checkpoints/efficientnet_nv_mel_classifier_recon_ms_ssim"
 
 IMAGE_SIZE      = 224          # EfficientNet-B0 default
-BATCH_SIZE      = 16
+BATCH_SIZE      = 8
 NUM_WORKERS     = 2
 LEARNING_RATE   = 1e-4         # lower LR appropriate for fine-tuning
-NUM_EPOCHS      = 30
+NUM_EPOCHS      = 50
 LABEL_SMOOTHING = 0.3          # aggressive label smoothing
 DEVICE          = "cuda" if torch.cuda.is_available() else "cpu"
 LABEL_NAMES     = ["NV", "MEL"]
@@ -403,7 +403,7 @@ plt.show()
 
 # %%
 # ── Collect Activation Distributions ─────────────────────────────────────────
-existing = sorted(glob.glob(os.path.join(CHECKPOINT_DIR, "epoch_*.pth")))
+existing = sorted(glob.glob(os.path.join(CHECKPOINT_DIR, "epoch_*.pth")))[10:30]
 all_probs = []
 ckpts = []
 
@@ -420,7 +420,7 @@ if existing:
             
             ckpt_probs = []
             batch_idx = 0
-            for batch in tqdm(val_loader, desc=f"Checkpoint {ckpt_num:03d}", leave=False):
+            for batch in tqdm(val_recon_loader, desc=f"Checkpoint {ckpt_num:03d}", leave=False):
                 if batch_idx >= 10: # ONLY FIRST 10 FOR NOW!!!
                     break
 
