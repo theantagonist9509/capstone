@@ -234,6 +234,6 @@ class NVMELVAE(nn.Module):
         log_var = self.fc_log_var(features) # (B, latent_dim, 7, 7)
         z       = self.reparameterise(mu, log_var)
         recon   = self.decoder(z)           # (B, 3, 224, 224)
-        return recon, mu, log_var
+        return recon
 
 # %%

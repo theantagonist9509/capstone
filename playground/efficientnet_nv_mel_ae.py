@@ -1,16 +1,5 @@
 # %% [markdown]
-# # EfficientNet-B0 Autoencoder – ISIC 2018 MEL vs NV
-# 
-# Binary classification: **MEL** (melanoma) vs **NV** (melanocytic nevi) using the ISIC 2018 Task 3 training set.
-# 
-# | Detail | Value |
-# |---|---|
-# | Backbone | EfficientNet-B0 (ImageNet-pretrained) |
-# | Input size | 224 × 224 (EfficientNet-B0 default) |
-# | Train/Val split | 80 / 20, `random_split` seeded at 42 |
-# | Class imbalance | `WeightedRandomSampler` on train split (NV greatly outnumbers MEL) |
-# | Val metric | MS-SSIM |
-# | Checkpointing | Per-epoch, auto-resume from latest `epoch_*.pth` |
+# # EfficientNet-B0 VAE – ISIC 2018 MEL vs NV
 
 # %%
 # ── Imports ──────────────────────────────────────────────────────────────────
@@ -32,7 +21,7 @@ if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
 from datasets import ISIC2018Dataset, TransformDataset
-from models import NVMELAutoencoder
+from models import NVMELVAE
 from losses import MS_SSIMLoss
 from utils import load_best_model
 
@@ -40,17 +29,22 @@ print(f"PyTorch {torch.__version__} | CUDA available: {torch.cuda.is_available()
 
 # %%
 # ── Parameters (edit here) ────────────────────────────────────────────────────
-DATASET_DIR    = "./dataset/ISIC_2018/ISIC2018_Task3_Training_Input"
-LABELS_CSV     = "./dataset/ISIC_2018/ISIC2018_Task3_Training_GroundTruth.csv"
-IMAGE_SIZE     = 224          # EfficientNet-B0 default
-BATCH_SIZE     = 16
-NUM_WORKERS    = 4
-VAL_SPLIT      = 0.2          # fraction held out for validation
-LEARNING_RATE  = 1e-4         # lower LR appropriate for fine-tuning
-NUM_EPOCHS     = 20
-CHECKPOINT_DIR = "./checkpoints/efficientnet_nv_mel_ae_ms_ssim"
-DEVICE         = "cuda" if torch.cuda.is_available() else "cpu"
-LABEL_NAMES    = ["NV", "MEL"]
+TRAIN_DATASET_DIR   = "dataset/ISIC_2018/ISIC2018_Task3_Training_Input"
+TRAIN_LABELS_CSV    = "dataset/ISIC_2018/ISIC2018_Task3_Training_GroundTruth.csv"
+
+VAL_DATASET_DIR     = "dataset/ISIC_2018/ISIC2018_Task3_Validation_Input"
+VAL_LABELS_CSV      = "dataset/ISIC_2018/ISIC2018_Task3_Validation_GroundTruth.csv"
+
+CHECKPOINT_DIR      = "checkpoints/efficientnet_nv_mel_vae"
+
+IMAGE_SIZE      = 224          # EfficientNet-B0 default
+BATCH_SIZE      = 16
+NUM_WORKERS     = 2
+LEARNING_RATE   = 1e-4         # lower LR appropriate for fine-tuning
+NUM_EPOCHS      = 20
+LABEL_SMOOTHING = 0.3          # aggressive label smoothing
+DEVICE          = "cuda" if torch.cuda.is_available() else "cpu"
+LABEL_NAMES     = ["NV", "MEL"]
 
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
@@ -86,49 +80,39 @@ print("Transform pipelines defined.")
 
 # %%
 # ── Dataset & DataLoaders ─────────────────────────────────────────────────────
-# Base dataset with transform=None so it returns raw PIL images.
-# TransformDataset wraps each split with its own augmentation pipeline.
 
-full_dataset = ISIC2018Dataset(
-    root_dir       = DATASET_DIR,
-    transform      = None,
-    labels_csv     = LABELS_CSV,
+train_dataset = ISIC2018Dataset(
+    root_dir       = TRAIN_DATASET_DIR,
+    transform      = train_transform,
+    labels_csv     = TRAIN_LABELS_CSV,
     include_labels = LABEL_NAMES,
 )
 
-print(f"Total labeled samples (NV+MEL): {len(full_dataset)}")
-
-# ── Train / Val split ─────────────────────────────────────────────────────────
-n_total = len(full_dataset)
-n_val   = int(n_total * VAL_SPLIT)
-n_train = n_total - n_val
-
-generator = torch.Generator().manual_seed(42)
-train_sub, val_sub = random_split(
-    full_dataset, [n_train, n_val], generator=generator
+val_dataset = ISIC2018Dataset(
+    root_dir       = VAL_DATASET_DIR,
+    transform      = val_transform,
+    labels_csv     = VAL_LABELS_CSV,
+    include_labels = LABEL_NAMES,
 )
 
-train_dataset = TransformDataset(train_sub, train_transform)
-val_dataset   = TransformDataset(val_sub,   val_transform)
-
-print(f"Train samples : {len(train_dataset):,}")
-print(f"Val   samples : {len(val_dataset):,}")
+print(f"Train dataset size: {len(train_dataset)}")
+print(f"Val dataset size:   {len(val_dataset)}")
 
 # ── Collect raw one-hot labels for WeightedRandomSampler (no image I/O) ──────
 # label_map rows are [NV, MEL]; binary label = argmax
-all_labels = [
-    int(full_dataset.label_map.loc[
+train_labels = [
+    int(train_dataset.label_map.loc[
         os.path.splitext(os.path.basename(p))[0]
     ].values.argmax())
-    for p in full_dataset.image_paths
+    for p in train_dataset.image_paths
 ]
-class_counts = np.bincount(all_labels)
-print(f"Class counts  : NV={class_counts[0]:,}  MEL={class_counts[1]:,}")
+train_class_counts = np.bincount(train_labels)
+print(f"Class counts (train): NV={train_class_counts[0]:,}  MEL={train_class_counts[1]:,}")
 
 # ── WeightedRandomSampler on train split only ─────────────────────────────────
-train_labels   = [all_labels[i] for i in train_sub.indices]
-class_weights  = 1.0 / class_counts
+class_weights  = 1.0 / train_class_counts
 sample_weights = [class_weights[lbl] for lbl in train_labels]
+
 train_sampler  = WeightedRandomSampler(
     weights     = torch.DoubleTensor(sample_weights),
     num_samples = len(train_dataset),
@@ -152,7 +136,7 @@ val_loader = DataLoader(
 )
 
 print(f"Train batches/epoch : {len(train_loader)}")
-print(f"Val   batches/epoch : {len(val_loader)}")
+print(f"Val batches         : {len(val_loader)}")
 
 # %%
 # ── Sanity check: visualise a batch ──────────────────────────────────────────
@@ -177,7 +161,7 @@ plt.tight_layout()
 plt.show()
 
 # %%
-model = NVMELAutoencoder(freeze_up_to=0).to(DEVICE)
+model = NVMELVAE(freeze_up_to=0).to(DEVICE)
 
 frozen   = sum(p.numel() for p in model.parameters() if not p.requires_grad)
 trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -192,8 +176,8 @@ optimizer = torch.optim.Adam(
     filter(lambda p: p.requires_grad, model.parameters()),
     lr=LEARNING_RATE,
 )
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    optimizer, T_max=NUM_EPOCHS, eta_min=1e-6
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='min', factor=0.5, patience=2, min_lr=1e-6
 )
 
 # ── History buffers ───────────────────────────────────────────────────────────

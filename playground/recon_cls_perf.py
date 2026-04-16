@@ -28,13 +28,13 @@ print(f"PyTorch {torch.__version__} | CUDA available: {torch.cuda.is_available()
 
 # %%
 # ── Parameters (edit here) ────────────────────────────────────────────────────
-DATASET_DIR         = "dataset/ISIC_2018/ISIC2018_Task3_Training_Input"
-LABELS_CSV          = "dataset/ISIC_2018/ISIC2018_Task3_Training_GroundTruth.csv"
+DATASET_DIR         = "dataset/ISIC_2018/ISIC2018_Task3_Validation_Input_Recon_MS_SSIM"
+LABELS_CSV          = "dataset/ISIC_2018/ISIC2018_Task3_Validation_GroundTruth.csv"
 IMAGE_SIZE          = 224          # EfficientNet-B0 default
 BATCH_SIZE          = 8
 NUM_WORKERS         = 2
 VAL_SPLIT           = 0.2          # fraction held out for validation
-CLS_CHECKPOINT_DIR  = "checkpoints/efficientnet_nv_mel_classifier/run_2"
+CLS_CHECKPOINT_DIR  = "checkpoints/efficientnet_nv_mel_classifier_pure_recon_ms_ssim"
 AE_CHECKPOINT_DIR   = "checkpoints/efficientnet_nv_mel_ae_ms_ssim"
 DEVICE              = "cuda" if torch.cuda.is_available() else "cpu"
 LABEL_NAMES         = ["NV", "MEL"]
@@ -54,28 +54,14 @@ val_transform = transforms.Compose([
                          [0.229, 0.224, 0.225]),
 ])
 
-full_dataset = ISIC2018Dataset(
+val_dataset = ISIC2018Dataset(
     root_dir       = DATASET_DIR,
-    transform      = None,
+    transform      = val_transform,
     labels_csv     = LABELS_CSV,
     include_labels = LABEL_NAMES,
 )
 
-print(f"Total labeled samples (NV+MEL): {len(full_dataset)}")
-
-# ── Train / Val split ─────────────────────────────────────────────────────────
-n_total = len(full_dataset)
-n_val   = int(n_total * VAL_SPLIT)
-n_train = n_total - n_val
-
-generator = torch.Generator().manual_seed(42)
-train_sub, val_sub = random_split(
-    full_dataset, [n_train, n_val], generator=generator
-)
-
-val_dataset = TransformDataset(val_sub, val_transform)
-
-print(f"Val samples : {len(val_dataset):,}")
+print(f"Val labeled samples (NV+MEL): {len(val_dataset)}")
 
 val_loader = DataLoader(
     val_dataset,
@@ -90,7 +76,7 @@ print(f"Val batches/epoch : {len(val_loader)}")
 # %%
 # Load best classifier
 classifier = NVMELClassifier(freeze_up_to=0).to(DEVICE)
-ckpt = load_best_model(classifier.backbone, CLS_CHECKPOINT_DIR, lambda ckpt: np.argmax(np.array(ckpt["val_aucs"])), DEVICE)
+ckpt = load_best_model(classifier, CLS_CHECKPOINT_DIR, lambda ckpt: np.argmax(np.array(ckpt["history"]["val_recon_f1s"])), DEVICE)
 
 print("Classifier:")
 print_checkpoint_info(ckpt)
