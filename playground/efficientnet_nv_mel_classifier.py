@@ -32,7 +32,7 @@ if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
 from datasets import ISIC2018Dataset, TransformDataset
-from models import NVMELClassifier
+from models import GrayscaleNVMELClassifier
 
 print(f"PyTorch {torch.__version__} | CUDA available: {torch.cuda.is_available()}")
 
@@ -46,13 +46,13 @@ VAL_ORIG_DATASET_DIR    = "dataset/ISIC_2018/ISIC2018_Task3_Validation_Input"
 VAL_RECON_DATASET_DIR   = "dataset/ISIC_2018/ISIC2018_Task3_Validation_Input_Recon_MS_SSIM"
 VAL_LABELS_CSV          = "dataset/ISIC_2018/ISIC2018_Task3_Validation_GroundTruth.csv"
 
-CHECKPOINT_DIR          = "checkpoints/efficientnet_nv_mel_classifier_recon_ms_ssim"
+CHECKPOINT_DIR          = "checkpoints/efficientnet_nv_mel_classifier_grayscale"
 
 IMAGE_SIZE      = 224          # EfficientNet-B0 default
-BATCH_SIZE      = 8
+BATCH_SIZE      = 16
 NUM_WORKERS     = 2
 LEARNING_RATE   = 1e-4         # lower LR appropriate for fine-tuning
-NUM_EPOCHS      = 50
+NUM_EPOCHS      = 20
 LABEL_SMOOTHING = 0.3          # aggressive label smoothing
 DEVICE          = "cuda" if torch.cuda.is_available() else "cpu"
 LABEL_NAMES     = ["NV", "MEL"]
@@ -73,17 +73,19 @@ train_transform = transforms.Compose([
     transforms.RandomHorizontalFlip(),
     transforms.RandomVerticalFlip(),
     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
+    transforms.Grayscale(num_output_channels=1),
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406],   # ImageNet mean
-                         [0.229, 0.224, 0.225]),   # ImageNet std
+    transforms.Normalize([0.449],   # Grayscale ImageNet mean
+                         [0.226]),  # Grayscale ImageNet std
 ])
 
 val_transform = transforms.Compose([
     transforms.Resize(256),
     transforms.CenterCrop(IMAGE_SIZE),
+    transforms.Grayscale(num_output_channels=1),
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406],
-                         [0.229, 0.224, 0.225]),
+    transforms.Normalize([0.449],
+                         [0.226]),
 ])
 
 print("Transform pipelines defined.")
@@ -105,7 +107,8 @@ train_recon_dataset = ISIC2018Dataset(
     include_labels = LABEL_NAMES,
 )
 
-train_dataset = ConcatDataset([train_orig_dataset, train_recon_dataset])
+#train_dataset = ConcatDataset([train_orig_dataset, train_recon_dataset])
+train_dataset = train_orig_dataset
 
 val_orig_dataset = ISIC2018Dataset(
     root_dir       = VAL_ORIG_DATASET_DIR,
@@ -121,7 +124,8 @@ val_recon_dataset = ISIC2018Dataset(
     include_labels = LABEL_NAMES,
 )
 
-val_dataset = ConcatDataset([val_orig_dataset, val_recon_dataset])
+#val_dataset = ConcatDataset([val_orig_dataset, val_recon_dataset])
+val_dataset = val_orig_dataset
 
 print(f"Train dataset size: {len(train_dataset)}")
 print(f"Val dataset size:   {len(val_dataset)}")
@@ -139,7 +143,9 @@ print(f"Class counts (train, original): NV={train_orig_class_counts[0]:,}  MEL={
 
 # ── WeightedRandomSampler on train split only ─────────────────────────────────
 class_weights  = 1.0 / train_orig_class_counts
-sample_weights = [class_weights[lbl] for lbl in train_orig_labels] * 2 # original + reconstructed
+sample_weights = [class_weights[lbl] for lbl in train_orig_labels]
+sample_weights = sample_weights * (len(train_dataset) // len(train_orig_dataset)) # if we decide to use both datasets
+
 train_sampler  = WeightedRandomSampler(
     weights     = torch.DoubleTensor(sample_weights),
     num_samples = len(train_dataset),
@@ -183,13 +189,13 @@ print("Batch shape :", sample_imgs.shape)
 print("Labels (raw):", sample_labels[:8].tolist())
 
 fig, axes = plt.subplots(1, 6, figsize=(15, 3))
-mean = np.array([0.485, 0.456, 0.406])
-std  = np.array([0.229, 0.224, 0.225])
+mean = 0.449
+std  = 0.226
 for i, ax in enumerate(axes):
-    img = sample_imgs[i].permute(1, 2, 0).numpy()
+    img = sample_imgs[i].squeeze(0).numpy() # (224, 224)
     img = (img * std + mean).clip(0, 1)
     cls = sample_labels[i].argmax().item()
-    ax.imshow(img)
+    ax.imshow(img, cmap="gray")
     ax.set_title(LABEL_NAMES[cls], fontsize=9)
     ax.axis("off")
 plt.suptitle("Sample images from train DataLoader", fontsize=12)
@@ -197,7 +203,7 @@ plt.tight_layout()
 plt.show()
 
 # %%
-model = NVMELClassifier(freeze_up_to=0).to(DEVICE)
+model = GrayscaleNVMELClassifier(freeze_up_to=0).to(DEVICE)
 
 frozen   = sum(p.numel() for p in model.parameters() if not p.requires_grad)
 trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)

@@ -39,6 +39,34 @@ class NVMELClassifier(nn.Module):
     def forward(self, x):
         return self.backbone(x)
 
+class GrayscaleNVMELClassifier(nn.Module):
+    def __init__(self, freeze_up_to):
+        super().__init__()
+
+        self.backbone = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
+
+        # Sum first layer weights accross channels
+        conv_orig = self.backbone.features[0][0]
+        w_orig = conv_orig.weight
+
+        conv_new = nn.Conv2d(1, 32, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+        conv_new.weight.data = w_orig.sum(dim=1, keepdim=True)
+        self.backbone.features[0][0] = conv_new
+
+        for i in range(freeze_up_to): # inlcudes stem
+            for param in self.backbone.features[i].parameters():
+                param.requires_grad = False
+
+        # Replace the classifier head: 1280-d → 1 (NV/MEL)
+        in_features = self.backbone.classifier[1].in_features
+        dropout_rate = 0.4
+        self.backbone.classifier = nn.Sequential(
+            nn.Dropout(p=dropout_rate, inplace=True),
+            nn.Linear(in_features, 1),
+        )
+
+    def forward(self, x):
+        return self.backbone(x)
 
 # %%
 # ── Model – EfficientNet-B0 Autoencoder ───────────────────────────────────────
@@ -77,6 +105,49 @@ class NVMELAutoencoder(nn.Module):
         features = self.encoder(x)
         return self.decoder(features)
 
+class GrayscaleNVMELAutoencoder(nn.Module):
+    def __init__(self, freeze_up_to):
+        super().__init__()
+
+        backbone = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
+        
+        # Sum first layer weights accross channels
+        conv_orig = backbone.features[0][0]
+        w_orig = conv_orig.weight
+
+        conv_new = nn.Conv2d(1, 32, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+        conv_new.weight.data = w_orig.sum(dim=1, keepdim=True)
+        backbone.features[0][0] = conv_new
+
+        for i in range(freeze_up_to): # includes stem
+            for param in backbone.features[i].parameters():
+                param.requires_grad = False
+
+        self.encoder = backbone.features
+        # encoder output: (B, 1280, 7, 7) for 224x224 input
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(1280, 512, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+            
+            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            
+            nn.ConvTranspose2d(64, 1, kernel_size=4, stride=2, padding=1),
+        )
+
+    def forward(self, x):
+        features = self.encoder(x)
+        return self.decoder(features)
 
 # %%
 # ── Model – EfficientNet-B0 VAE ───────────────────────────────────────────────
