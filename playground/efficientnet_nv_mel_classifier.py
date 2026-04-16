@@ -1,5 +1,5 @@
 # %% [markdown]
-# # EfficientNet-B0 Fine-Tuning – ISIC 2018 MEL vs NV
+# # EfficientNet-B0 Fine-Tuning – ISIC 2018 MEL vs NV (Trained purely on Recon images)
 # 
 # Binary classification: **MEL** (melanoma) vs **NV** (melanocytic nevi) using the ISIC 2018 Task 3 training set.
 # 
@@ -32,7 +32,7 @@ if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
 from datasets import ISIC2018Dataset, TransformDataset
-from models import GrayscaleNVMELClassifier
+from models import NVMELClassifier
 
 print(f"PyTorch {torch.__version__} | CUDA available: {torch.cuda.is_available()}")
 
@@ -46,7 +46,7 @@ VAL_ORIG_DATASET_DIR    = "dataset/ISIC_2018/ISIC2018_Task3_Validation_Input"
 VAL_RECON_DATASET_DIR   = "dataset/ISIC_2018/ISIC2018_Task3_Validation_Input_Recon_MS_SSIM"
 VAL_LABELS_CSV          = "dataset/ISIC_2018/ISIC2018_Task3_Validation_GroundTruth.csv"
 
-CHECKPOINT_DIR          = "checkpoints/efficientnet_nv_mel_classifier_grayscale"
+CHECKPOINT_DIR          = "checkpoints/efficientnet_nv_mel_classifier_pure_recon_ms_ssim"
 
 IMAGE_SIZE      = 224          # EfficientNet-B0 default
 BATCH_SIZE      = 16
@@ -73,19 +73,17 @@ train_transform = transforms.Compose([
     transforms.RandomHorizontalFlip(),
     transforms.RandomVerticalFlip(),
     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
-    transforms.Grayscale(num_output_channels=1),
     transforms.ToTensor(),
-    transforms.Normalize([0.449],   # Grayscale ImageNet mean
-                         [0.226]),  # Grayscale ImageNet std
+    transforms.Normalize([0.485, 0.456, 0.406],   # ImageNet mean
+                         [0.229, 0.224, 0.225]),   # ImageNet std
 ])
 
 val_transform = transforms.Compose([
     transforms.Resize(256),
     transforms.CenterCrop(IMAGE_SIZE),
-    transforms.Grayscale(num_output_channels=1),
     transforms.ToTensor(),
-    transforms.Normalize([0.449],
-                         [0.226]),
+    transforms.Normalize([0.485, 0.456, 0.406],
+                         [0.229, 0.224, 0.225]),
 ])
 
 print("Transform pipelines defined.")
@@ -108,7 +106,7 @@ train_recon_dataset = ISIC2018Dataset(
 )
 
 #train_dataset = ConcatDataset([train_orig_dataset, train_recon_dataset])
-train_dataset = train_orig_dataset
+train_dataset = train_recon_dataset
 
 val_orig_dataset = ISIC2018Dataset(
     root_dir       = VAL_ORIG_DATASET_DIR,
@@ -125,7 +123,7 @@ val_recon_dataset = ISIC2018Dataset(
 )
 
 #val_dataset = ConcatDataset([val_orig_dataset, val_recon_dataset])
-val_dataset = val_orig_dataset
+val_dataset = val_recon_dataset
 
 print(f"Train dataset size: {len(train_dataset)}")
 print(f"Val dataset size:   {len(val_dataset)}")
@@ -189,13 +187,13 @@ print("Batch shape :", sample_imgs.shape)
 print("Labels (raw):", sample_labels[:8].tolist())
 
 fig, axes = plt.subplots(1, 6, figsize=(15, 3))
-mean = 0.449
-std  = 0.226
+mean = np.array([0.485, 0.456, 0.406])
+std  = np.array([0.229, 0.224, 0.225])
 for i, ax in enumerate(axes):
-    img = sample_imgs[i].squeeze(0).numpy() # (224, 224)
+    img = sample_imgs[i].permute(1, 2, 0).numpy()
     img = (img * std + mean).clip(0, 1)
     cls = sample_labels[i].argmax().item()
-    ax.imshow(img, cmap="gray")
+    ax.imshow(img)
     ax.set_title(LABEL_NAMES[cls], fontsize=9)
     ax.axis("off")
 plt.suptitle("Sample images from train DataLoader", fontsize=12)
@@ -203,7 +201,7 @@ plt.tight_layout()
 plt.show()
 
 # %%
-model = GrayscaleNVMELClassifier(freeze_up_to=0).to(DEVICE)
+model = NVMELClassifier(freeze_up_to=0).to(DEVICE)
 
 frozen   = sum(p.numel() for p in model.parameters() if not p.requires_grad)
 trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -219,7 +217,7 @@ optimizer = torch.optim.Adam(
     lr=LEARNING_RATE,
 )
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode='min', factor=0.5, patience=3, min_lr=1e-6
+    optimizer, mode='min', factor=0.5, patience=2, min_lr=1e-6
 )
 
 # ── History buffers ───────────────────────────────────────────────────────────
@@ -426,7 +424,7 @@ if existing:
             
             ckpt_probs = []
             batch_idx = 0
-            for batch in tqdm(val_recon_loader, desc=f"Checkpoint {ckpt_num:03d}", leave=False):
+            for batch in tqdm(val_loader, desc=f"Checkpoint {ckpt_num:03d}", leave=False):
                 if batch_idx >= 10: # ONLY FIRST 10 FOR NOW!!!
                     break
 
