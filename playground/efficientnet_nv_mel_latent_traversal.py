@@ -51,6 +51,7 @@ val_orig_dataset = ISIC2018Dataset(
     transform      = val_transform,
     labels_csv     = VAL_LABELS_CSV,
     include_labels = LABEL_NAMES,
+    load_into_memory = True,
 )
 
 val_loader = DataLoader(val_orig_dataset, batch_size=1, shuffle=False)
@@ -260,33 +261,30 @@ def extrapolate_image(
 
 if INTERACTIVE:
     import gradio as gr
+    import matplotlib.cm as cm
     def launch_gradio_app():
+        print("Preparing gallery images...")
+        mean_t = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+        std_t  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+        
+        gallery_items = []
+        for idx in range(len(val_orig_dataset)):
+            item = val_orig_dataset[idx]
+            img_t = item["image"]
+            lbl_t = item["label"]
+            img_disp = (img_t * std_t + mean_t).clamp(0, 1).permute(1, 2, 0).numpy()
+            lbl_idx = lbl_t.argmax().item()
+            gallery_items.append((img_disp, f"{LABEL_NAMES[lbl_idx]}"))
+
         with gr.Blocks() as demo:
             gr.Markdown("# Latent Traversal Interactive Interface")
             
             current_z_state = gr.State(None)
-            current_img_state = gr.State(None)
+            orig_recon_state = gr.State(None)
             
-            with gr.Tab("Pick Image"):
-                img_index = gr.Slider(0, len(val_orig_dataset) - 1, step=1, label="Image Index", value=0)
-                btn_load = gr.Button("Load Image")
-                img_display = gr.Image(label="Selected Image")
-                lbl_display = gr.Textbox(label="Label")
-                btn_start = gr.Button("Start Traversal")
+            with gr.Tab("Selection & Traversal"):
+                gallery = gr.Gallery(value=gallery_items, label="Validation Dataset (Click to Select & Start)", columns=8, allow_preview=False)
                 
-                def load_image(idx):
-                    item = val_orig_dataset[idx]
-                    img_t = item["image"]
-                    lbl_t = item["label"]
-                    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-                    std  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-                    img_disp = (img_t * std + mean).clamp(0, 1).permute(1, 2, 0).numpy()
-                    lbl_idx = lbl_t.argmax().item()
-                    return img_disp, f"Class: {LABEL_NAMES[lbl_idx]}", img_t.unsqueeze(0)
-                    
-                btn_load.click(load_image, inputs=[img_index], outputs=[img_display, lbl_display, current_img_state])
-                
-            with gr.Tab("Traverse"):
                 with gr.Row():
                     btn_step_mel = gr.Button("Step Towards MEL (Gradient IN)")
                     btn_step_nv = gr.Button("Step Towards NV (Gradient AGAINST)")
@@ -295,16 +293,30 @@ if INTERACTIVE:
                     chk_orthogonal = gr.Checkbox(label="Orthogonal", value=False)
                     lr_slider = gr.Slider(0.001, 10.0, value=1.0, label="Learning Rate (SGD)")
                     
-                out_img = gr.Image(label="Reconstructed Image")
+                with gr.Row():
+                    orig_img_display = gr.Image(label="Selected Original Image")
+                    orig_recon_display = gr.Image(label="Original Reconstruction")
+                    out_img = gr.Image(label="Current Decoded Image")
+                    diff_map_display = gr.Image(label="Difference Map (recon vs current)")
+                    
                 out_info = gr.Textbox(label="Current Info")
                 
-                def start_traversal(img_t):
-                    if img_t is None:
-                        return None, "Please select an image first.", None
+                def get_diff_map(orig_rgb, current_rgb):
+                    lum_weights = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+                    diff_map = ((current_rgb - orig_rgb) * lum_weights).sum(axis=-1)
+                    abs_max = max(np.abs(diff_map).max(), 1e-6)
+                    norm_diff = (diff_map + abs_max) / (2 * abs_max)
+                    return cm.RdBu_r(norm_diff)[:, :, :3]
+                
+                def on_gallery_select(evt: gr.SelectData):
+                    idx = evt.index
+                    item = val_orig_dataset[idx]
+                    img_t = item["image"].to(DEVICE)
+                    lbl_t = item["label"]
+                    lbl_idx = lbl_t.argmax().item()
                     
-                    img_t = img_t.to(DEVICE)
                     with torch.no_grad():
-                        z_initial = ae_model.encoder(img_t)
+                        z_initial = ae_model.encoder(img_t.unsqueeze(0))
                         x_recon = ae_model.decoder(z_initial)
                     
                     logit = classifier_model(x_recon).squeeze(-1)
@@ -313,15 +325,21 @@ if INTERACTIVE:
                     
                     mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).to(DEVICE)
                     std  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).to(DEVICE)
+                    
+                    orig_disp = (img_t * std + mean).clamp(0, 1).permute(1, 2, 0).cpu().numpy()
                     sq_disp = (x_recon[0] * std + mean).clamp(0, 1).permute(1, 2, 0).cpu().numpy()
                     
-                    return sq_disp, f"Prob MEL: {prob:.4f} | Recon Err: {err:.4f}", z_initial.detach()
+                    info_text = f"Class: {LABEL_NAMES[lbl_idx]} | Prob MEL: {prob:.4f} | Recon Err: {err:.4f}"
                     
-                btn_start.click(start_traversal, inputs=[current_img_state], outputs=[out_img, out_info, current_z_state])
+                    diff_colored = get_diff_map(sq_disp, sq_disp)
+                    
+                    return orig_disp, sq_disp, sq_disp, diff_colored, info_text, z_initial.detach(), sq_disp
+                    
+                gallery.select(on_gallery_select, inputs=[], outputs=[orig_img_display, orig_recon_display, out_img, diff_map_display, out_info, current_z_state, orig_recon_state])
                 
-                def take_step(z, lr, orthogonal, direction_mode):
+                def take_step(z, lr, orthogonal, direction_mode, orig_recon_disp):
                     if z is None:
-                        return None, "Please start traversal first.", None
+                        return None, None, "Please select an image first.", None
                     
                     z_ = z.detach().clone().requires_grad_(True)
                     logit = classifier_model(ae_model.decoder(z_)).squeeze(-1)
@@ -349,10 +367,12 @@ if INTERACTIVE:
                     std  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).to(DEVICE)
                     sq_disp = (x_recon[0] * std + mean).clamp(0, 1).permute(1, 2, 0).cpu().numpy()
                     
-                    return sq_disp, f"Prob MEL: {prob:.4f} | Recon Err: {err:.4f}", new_z
+                    diff_colored = get_diff_map(orig_recon_disp, sq_disp)
                     
-                btn_step_mel.click(take_step, inputs=[current_z_state, lr_slider, chk_orthogonal, gr.State(1.0)], outputs=[out_img, out_info, current_z_state])
-                btn_step_nv.click(take_step, inputs=[current_z_state, lr_slider, chk_orthogonal, gr.State(-1.0)], outputs=[out_img, out_info, current_z_state])
+                    return sq_disp, diff_colored, f"Prob MEL: {prob:.4f} | Recon Err: {err:.4f}", new_z
+                    
+                btn_step_mel.click(take_step, inputs=[current_z_state, lr_slider, chk_orthogonal, gr.State(1.0), orig_recon_state], outputs=[out_img, diff_map_display, out_info, current_z_state])
+                btn_step_nv.click(take_step, inputs=[current_z_state, lr_slider, chk_orthogonal, gr.State(-1.0), orig_recon_state], outputs=[out_img, diff_map_display, out_info, current_z_state])
 
         demo.launch(server_name="0.0.0.0", share=False)
             

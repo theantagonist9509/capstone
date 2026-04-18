@@ -27,12 +27,12 @@ DATASET_DIR    = "./dataset/ISIC_2018/ISIC2018_Task3_Validation_Input"
 LABELS_CSV     = "./dataset/ISIC_2018/ISIC2018_Task3_Validation_GroundTruth.csv"
 IMAGE_SIZE     = 224          # EfficientNet-B0 default
 BATCH_SIZE     = 16
-NUM_WORKERS    = 4
-CHECKPOINT_DIR = "./checkpoints/efficientnet_nv_mel_ae_ms_ssim"
+NUM_WORKERS    = 2
+CHECKPOINT_DIR = "./checkpoints/efficientnet_nv_mel_vae"
 DEVICE         = "cuda" if torch.cuda.is_available() else "cpu"
 LABEL_NAMES         = ["NV", "MEL"]
 
-RECON_DIR      = "./dataset/ISIC_2018/ISIC2018_Task3_Validation_Input_Recon_MS_SSIM"
+RECON_DIR      = "./local_dataset/ISIC_2018/ISIC2018_Task3_Validation_Input_Recon_VAE"
 
 os.makedirs(RECON_DIR, exist_ok=True)
 
@@ -64,6 +64,7 @@ dataset = ISIC2018Dataset(
     transform      = input_transform,
     labels_csv     = LABELS_CSV,
     include_labels = LABEL_NAMES,
+    load_into_memory = True,
 )
 
 print(f"Total labeled samples (NV+MEL): {len(dataset)}")
