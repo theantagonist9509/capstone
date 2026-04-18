@@ -39,14 +39,14 @@ print(f"PyTorch {torch.__version__} | CUDA available: {torch.cuda.is_available()
 # %%
 # ── Parameters (edit here) ────────────────────────────────────────────────────
 TRAIN_ORIG_DATASET_DIR  = "dataset/ISIC_2018/ISIC2018_Task3_Training_Input"
-TRAIN_RECON_DATASET_DIR = "dataset/ISIC_2018/ISIC2018_Task3_Training_Input_Recon_MS_SSIM"
+TRAIN_RECON_DATASET_DIR = "dataset/ISIC_2018/ISIC2018_Task3_Training_Input_Recon_VAE"
 TRAIN_LABELS_CSV        = "dataset/ISIC_2018/ISIC2018_Task3_Training_GroundTruth.csv"
 
 VAL_ORIG_DATASET_DIR    = "dataset/ISIC_2018/ISIC2018_Task3_Validation_Input"
-VAL_RECON_DATASET_DIR   = "dataset/ISIC_2018/ISIC2018_Task3_Validation_Input_Recon_MS_SSIM"
+VAL_RECON_DATASET_DIR   = "dataset/ISIC_2018/ISIC2018_Task3_Validation_Input_Recon_VAE"
 VAL_LABELS_CSV          = "dataset/ISIC_2018/ISIC2018_Task3_Validation_GroundTruth.csv"
 
-CHECKPOINT_DIR          = "checkpoints/efficientnet_nv_mel_classifier_pure_recon_ms_ssim"
+CHECKPOINT_DIR          = "checkpoints/efficientnet_nv_mel_classifier_pure_recon_vae"
 
 IMAGE_SIZE      = 224          # EfficientNet-B0 default
 BATCH_SIZE      = 16
@@ -96,6 +96,7 @@ train_orig_dataset = ISIC2018Dataset(
     transform      = train_transform,
     labels_csv     = TRAIN_LABELS_CSV,
     include_labels = LABEL_NAMES,
+    #load_into_memory = True,
 )
 
 train_recon_dataset = ISIC2018Dataset(
@@ -103,6 +104,7 @@ train_recon_dataset = ISIC2018Dataset(
     transform      = train_transform,
     labels_csv     = TRAIN_LABELS_CSV,
     include_labels = LABEL_NAMES,
+    load_into_memory = True,
 )
 
 #train_dataset = ConcatDataset([train_orig_dataset, train_recon_dataset])
@@ -113,6 +115,7 @@ val_orig_dataset = ISIC2018Dataset(
     transform      = val_transform,
     labels_csv     = VAL_LABELS_CSV,
     include_labels = LABEL_NAMES,
+    load_into_memory = True,
 )
 
 val_recon_dataset = ISIC2018Dataset(
@@ -120,13 +123,11 @@ val_recon_dataset = ISIC2018Dataset(
     transform      = val_transform,
     labels_csv     = VAL_LABELS_CSV,
     include_labels = LABEL_NAMES,
+    load_into_memory = True,
 )
 
-#val_dataset = ConcatDataset([val_orig_dataset, val_recon_dataset])
-val_dataset = val_recon_dataset
-
 print(f"Train dataset size: {len(train_dataset)}")
-print(f"Val dataset size:   {len(val_dataset)}")
+print(f"Val dataset (orig): {len(val_orig_dataset)}")
 
 # ── Collect raw one-hot labels for WeightedRandomSampler (no image I/O) ──────
 # label_map rows are [NV, MEL]; binary label = argmax

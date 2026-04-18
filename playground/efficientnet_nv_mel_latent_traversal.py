@@ -16,7 +16,7 @@ if parent_dir not in sys.path:
 
 from datasets import ISIC2018Dataset
 from models import NVMELAutoencoder, NVMELClassifier
-from utils import load_best_model, print_checkpoint_info
+from utils import load_best_model, print_checkpoint_info, get_orthogonal_pca_bases
 from losses import MS_SSIMLoss
 
 # %%
@@ -263,18 +263,25 @@ if INTERACTIVE:
     import gradio as gr
     import matplotlib.cm as cm
     def launch_gradio_app():
-        print("Preparing gallery images...")
+        print("Preparing gallery images and computing dataset embeddings...")
         mean_t = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
         std_t  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
         
         gallery_items = []
-        for idx in range(len(val_orig_dataset)):
-            item = val_orig_dataset[idx]
-            img_t = item["image"]
-            lbl_t = item["label"]
-            img_disp = (img_t * std_t + mean_t).clamp(0, 1).permute(1, 2, 0).numpy()
-            lbl_idx = lbl_t.argmax().item()
-            gallery_items.append((img_disp, f"{LABEL_NAMES[lbl_idx]}"))
+        all_imgs = []
+        with torch.no_grad():
+            for idx in range(len(val_orig_dataset)):
+                item = val_orig_dataset[idx]
+                img_t = item["image"]
+                lbl_t = item["label"]
+                img_disp = (img_t * std_t + mean_t).clamp(0, 1).permute(1, 2, 0).numpy()
+                lbl_idx = lbl_t.argmax().item()
+                gallery_items.append((img_disp, f"{LABEL_NAMES[lbl_idx]}"))
+                
+                all_imgs.append(img_t)
+                
+            all_imgs_batch = torch.stack(all_imgs, dim=0).to(DEVICE)
+            all_embeddings = ae_model.encoder(all_imgs_batch)
 
         with gr.Blocks() as demo:
             gr.Markdown("# Latent Traversal Interactive Interface")
@@ -288,10 +295,17 @@ if INTERACTIVE:
                 with gr.Row():
                     btn_step_mel = gr.Button("Step Towards MEL (Gradient IN)")
                     btn_step_nv = gr.Button("Step Towards NV (Gradient AGAINST)")
+                    
+                with gr.Row():
+                    btn_pca_pos_1 = gr.Button("Step +PCA Base 1")
+                    btn_pca_neg_1 = gr.Button("Step -PCA Base 1")
+                    btn_pca_pos_2 = gr.Button("Step +PCA Base 2")
+                    btn_pca_neg_2 = gr.Button("Step -PCA Base 2")
                 
                 with gr.Row():
                     chk_orthogonal = gr.Checkbox(label="Orthogonal", value=False)
-                    lr_slider = gr.Slider(0.001, 10.0, value=1.0, label="Learning Rate (SGD)")
+                    lr_slider = gr.Slider(0.001, 10.0, value=1.0, label="Learning Rate (Step Size)")
+                    n_steps_slider = gr.Slider(1, 100, value=1, step=1, label="Number of Steps")
                     
                 with gr.Row():
                     orig_img_display = gr.Image(label="Selected Original Image")
@@ -337,25 +351,30 @@ if INTERACTIVE:
                     
                 gallery.select(on_gallery_select, inputs=[], outputs=[orig_img_display, orig_recon_display, out_img, diff_map_display, out_info, current_z_state, orig_recon_state])
                 
-                def take_step(z, lr, orthogonal, direction_mode, orig_recon_disp):
+                def take_step(z, lr, n_steps, orthogonal, direction_mode, orig_recon_disp):
                     if z is None:
                         return None, None, "Please select an image first.", None
                     
-                    z_ = z.detach().clone().requires_grad_(True)
-                    logit = classifier_model(ae_model.decoder(z_)).squeeze(-1)
-                    loss = -direction_mode * logit
-                    loss.backward()
+                    z_ = z.detach().clone()
                     
-                    g = z_.grad.clone()
-                    if orthogonal:
-                        V = _recon_grad(z_)
-                        g_flat, V_flat = g.view(-1), V.view(-1)
-                        V_norm_sq = (V_flat * V_flat).sum()
-                        if V_norm_sq.item() > 1e-12:
-                            g_flat = g_flat - (g_flat @ V_flat) / V_norm_sq * V_flat
-                        g = g_flat.view_as(g)
+                    for _ in range(n_steps):
+                        z_ = z_.requires_grad_(True)
+                        logit = classifier_model(ae_model.decoder(z_)).squeeze(-1)
+                        loss = -direction_mode * logit
+                        loss.backward()
                         
-                    new_z = z_.detach() - lr * g
+                        g = z_.grad.clone()
+                        if orthogonal:
+                            V = _recon_grad(z_)
+                            g_flat, V_flat = g.view(-1), V.view(-1)
+                            V_norm_sq = (V_flat * V_flat).sum()
+                            if V_norm_sq.item() > 1e-12:
+                                g_flat = g_flat - (g_flat @ V_flat) / V_norm_sq * V_flat
+                            g = g_flat.view_as(g)
+                            
+                        z_ = (z_.detach() - lr * g).detach()
+                        
+                    new_z = z_
                     
                     with torch.no_grad():
                         x_recon = ae_model.decoder(new_z)
@@ -371,8 +390,47 @@ if INTERACTIVE:
                     
                     return sq_disp, diff_colored, f"Prob MEL: {prob:.4f} | Recon Err: {err:.4f}", new_z
                     
-                btn_step_mel.click(take_step, inputs=[current_z_state, lr_slider, chk_orthogonal, gr.State(1.0), orig_recon_state], outputs=[out_img, diff_map_display, out_info, current_z_state])
-                btn_step_nv.click(take_step, inputs=[current_z_state, lr_slider, chk_orthogonal, gr.State(-1.0), orig_recon_state], outputs=[out_img, diff_map_display, out_info, current_z_state])
+                def take_pca_step(z, lr, n_steps, base_idx, sign, orig_recon_disp):
+                    if z is None:
+                        return None, None, "Please select an image first.", None
+                    
+                    z_ = z.detach().clone()
+                    
+                    for _ in range(n_steps):
+                        z_ = z_.requires_grad_(True)
+                        logit = classifier_model(ae_model.decoder(z_)).squeeze(-1)
+                        logit.backward()
+                        ref_grad = z_.grad.clone().detach()
+                        z_ = z_.detach()
+                        
+                        bases = get_orthogonal_pca_bases(all_embeddings, ref_grad, k=2)
+                        base = bases[base_idx].to(DEVICE)
+                        
+                        z_ = z_ + sign * lr * base
+                        
+                    new_z = z_
+                    
+                    with torch.no_grad():
+                        x_recon = ae_model.decoder(new_z)
+                        new_logit = classifier_model(x_recon).squeeze(-1)
+                        prob = torch.sigmoid(new_logit).item()
+                        err = _recon_error(x_recon)
+                        
+                    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).to(DEVICE)
+                    std  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).to(DEVICE)
+                    sq_disp = (x_recon[0] * std + mean).clamp(0, 1).permute(1, 2, 0).cpu().numpy()
+                    
+                    diff_colored = get_diff_map(orig_recon_disp, sq_disp)
+                    
+                    return sq_disp, diff_colored, f"Prob MEL: {prob:.4f} | Recon Err: {err:.4f}", new_z
+                    
+                btn_step_mel.click(take_step, inputs=[current_z_state, lr_slider, n_steps_slider, chk_orthogonal, gr.State(1.0), orig_recon_state], outputs=[out_img, diff_map_display, out_info, current_z_state])
+                btn_step_nv.click(take_step, inputs=[current_z_state, lr_slider, n_steps_slider, chk_orthogonal, gr.State(-1.0), orig_recon_state], outputs=[out_img, diff_map_display, out_info, current_z_state])
+                
+                btn_pca_pos_1.click(take_pca_step, inputs=[current_z_state, lr_slider, n_steps_slider, gr.State(0), gr.State(1.0), orig_recon_state], outputs=[out_img, diff_map_display, out_info, current_z_state])
+                btn_pca_neg_1.click(take_pca_step, inputs=[current_z_state, lr_slider, n_steps_slider, gr.State(0), gr.State(-1.0), orig_recon_state], outputs=[out_img, diff_map_display, out_info, current_z_state])
+                btn_pca_pos_2.click(take_pca_step, inputs=[current_z_state, lr_slider, n_steps_slider, gr.State(1), gr.State(1.0), orig_recon_state], outputs=[out_img, diff_map_display, out_info, current_z_state])
+                btn_pca_neg_2.click(take_pca_step, inputs=[current_z_state, lr_slider, n_steps_slider, gr.State(1), gr.State(-1.0), orig_recon_state], outputs=[out_img, diff_map_display, out_info, current_z_state])
 
         demo.launch(server_name="0.0.0.0", share=False)
             

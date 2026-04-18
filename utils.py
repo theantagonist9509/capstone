@@ -36,3 +36,35 @@ def print_checkpoint_info(ckpt):
         print(f"{k}: {v}")
 
 # %%
+def get_orthogonal_pca_bases(embeddings: torch.Tensor, reference: torch.Tensor, k: int = 2) -> torch.Tensor:
+    """
+    Computes PCA on the embeddings' components orthogonal to the reference.
+    
+    Args:
+        embeddings: Tensor of shape (B, ...) where dim 0 is batch size.
+        reference: Tensor of shape (...) matching a single embedding.
+        k: Number of bases to return.
+        
+    Returns:
+        bases: Tensor of shape (k, ...) containing the PCA bases.
+    """
+    orig_shape = reference.shape
+    B = embeddings.shape[0]
+    
+    X = embeddings.view(B, -1)
+    r = reference.view(-1)
+    
+    r_norm = r / (r.norm(p=2) + 1e-8)
+    
+    projs = torch.matmul(X, r_norm).unsqueeze(1) * r_norm.unsqueeze(0)
+    X_ortho = X - projs
+    
+    X_centered = X_ortho - X_ortho.mean(dim=0, keepdim=True)
+    
+    _, _, Vh = torch.linalg.svd(X_centered, full_matrices=False)
+    
+    bases = Vh[:k]
+    
+    return bases.view(k, *orig_shape)
+
+# %%
