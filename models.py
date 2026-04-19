@@ -161,7 +161,7 @@ class GrayscaleNVMELAutoencoder(nn.Module):
 #   loss = reconstruction_loss + β * KL_loss
 #   KL   = -0.5 * mean(1 + log_var - mu² - exp(log_var))
 
-class NVMELVAE(nn.Module):
+class NVMELVAE_Legacy(nn.Module):
     def __init__(self, freeze_up_to: int = 0, latent_dim: int = 1024):
         """
         Args:
@@ -235,5 +235,116 @@ class NVMELVAE(nn.Module):
         z       = self.reparameterise(mu, log_var)
         recon   = self.decoder(z)           # (B, 3, 224, 224)
         return recon
+
+# %%
+# ── Model – EfficientNet-B0 VAE (New Interface) ─────────────────────────────
+class NVMELVAE(nn.Module):
+    def __init__(self, freeze_up_to: int = 0, latent_dim: int = 1024):
+        """
+        Args:
+            freeze_up_to: freeze backbone.features[0..freeze_up_to-1]
+            latent_dim:   number of channels in the spatial latent map
+        """
+        super().__init__()
+
+        backbone = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
+        for i in range(freeze_up_to):
+            for param in backbone.features[i].parameters():
+                param.requires_grad = False
+
+        self.features = backbone.features
+        self.fc_mu = nn.Conv2d(1280, latent_dim, kernel_size=1)
+        self.fc_log_var = nn.Conv2d(1280, latent_dim, kernel_size=1)
+
+        self.decoder = nn.Sequential(
+            # 7 → 14
+            nn.ConvTranspose2d(latent_dim, 512, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+
+            # 14 → 28
+            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+
+            # 28 → 56
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+
+            # 56 → 112
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+
+            # 112 → 224
+            nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1),
+            nn.Sigmoid(),   # output in [0, 1] — drop if inputs are normalised
+        )
+
+    def encoder(self, x: torch.Tensor):
+        features = self.features(x)
+        mu = self.fc_mu(features)
+        if self.training:
+            log_var = self.fc_log_var(features)
+            std = torch.exp(0.5 * log_var)
+            eps = torch.randn_like(std)
+            return mu + eps * std
+        return mu
+
+    def forward(self, x: torch.Tensor):
+        return self.decoder(self.encoder(x))
+
+# %%
+if __name__ == "__main__":
+    import os
+    import glob
+    import sys
+    
+    parent_dir = os.path.abspath(os.path.join(os.getcwd(), "."))
+    if parent_dir not in sys.path:
+        sys.path.append(parent_dir)
+
+    from utils import load_best_model
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    old_model = NVMELVAE_Legacy().to(device)
+    new_model = NVMELVAE().to(device)
+    
+    ckpt_dir = "checkpoints/efficientnet_nv_mel_vae_legacy"
+    new_ckpt_dir = "checkpoints/efficientnet_nv_mel_vae"
+    os.makedirs(new_ckpt_dir, exist_ok=True)
+    
+    ckpts = sorted(glob.glob(os.path.join(ckpt_dir, "epoch_*.pth")))
+    
+    for i in range(len(ckpts)):
+        print(f"Processing checkpoint {i+1}/{len(ckpts)}...")
+        
+        # Use utils.py function to iteratively load models
+        ckpt = load_best_model(old_model, ckpt_dir, lambda c, idx=i: idx, device)
+        
+        # Map old state dict to new state dict keys
+        old_sd = old_model.state_dict()
+        new_sd = new_model.state_dict()
+        
+        for k, v in old_sd.items():
+            if k.startswith("encoder."):
+                new_k = k.replace("encoder.", "features.", 1)
+            else:
+                new_k = k
+                
+            if new_k in new_sd:
+                new_sd[new_k].copy_(v)
+            else:
+                print(f"Warning: Key {new_k} not found in new model!")
+                
+        # Update checkpoint model_state and serialize
+        ckpt["model_state"] = new_model.state_dict()
+        
+        filename = os.path.basename(ckpts[i])
+        new_ckpt_path = os.path.join(new_ckpt_dir, filename)
+        torch.save(ckpt, new_ckpt_path)
+        print(f"Saved {new_ckpt_path}")
+
 
 # %%

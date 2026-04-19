@@ -15,7 +15,7 @@ if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
 from datasets import ISIC2018Dataset
-from models import NVMELAutoencoder, NVMELClassifier
+from models import NVMELClassifier, NVMELAutoencoder, NVMELVAE
 from utils import load_best_model, print_checkpoint_info, get_orthogonal_pca_bases
 from losses import MS_SSIMLoss
 
@@ -28,8 +28,8 @@ print(f"Using device: {DEVICE}")
 VAL_ORIG_DATASET_DIR = "dataset/ISIC_2018/ISIC2018_Task3_Validation_Input"
 VAL_LABELS_CSV       = "dataset/ISIC_2018/ISIC2018_Task3_Validation_GroundTruth.csv"
 
-AE_CHECKPOINT_DIR  = "checkpoints/efficientnet_nv_mel_ae_ms_ssim"
-CLS_CHECKPOINT_DIR = "checkpoints/efficientnet_nv_mel_classifier_recon_ms_ssim"
+AE_CHECKPOINT_DIR  = "checkpoints/efficientnet_nv_mel_vae"
+CLS_CHECKPOINT_DIR = "checkpoints/efficientnet_nv_mel_classifier_pure_recon_vae"
 
 IMAGE_SIZE  = 224
 LABEL_NAMES = ["NV", "MEL"]
@@ -59,7 +59,7 @@ print(f"Validation (orig) set size: {len(val_orig_dataset)}")
 
 # %%
 # ── Load Best Checkpoints ─────────────────────────────────────────────────────
-ae_model = NVMELAutoencoder(freeze_up_to=0).to(DEVICE)
+ae_model = NVMELVAE(freeze_up_to=0).to(DEVICE)
 ae_ckpt  = load_best_model(
     ae_model,
     AE_CHECKPOINT_DIR,

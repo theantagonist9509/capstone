@@ -23,7 +23,7 @@ if parent_dir not in sys.path:
 from datasets import ISIC2018Dataset, TransformDataset
 from models import NVMELVAE
 from losses import MS_SSIMLoss
-from utils import load_best_model
+from utils import load_best_model, print_checkpoint_info
 
 print(f"PyTorch {torch.__version__} | CUDA available: {torch.cuda.is_available()}")
 
