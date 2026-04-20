@@ -1,3 +1,24 @@
+# Visualizing Medical Classifier Decision Boundaries via Latent Space Traversal
+## Brief Description
+We use autoencoders to map the latent space of input images to the medical classifier's outputs. We explore the classifier's decision boundary by moving through this space along two axes:
+
+1. The Gradient Axis: We move with or against the gradient to see which image features increase or decrease the classifier's score.
+
+2. The PCA Axis: We move sideways using PCA to find different-looking images that yield the same score.
+
+## Motivation & Problem Statement
+### Dataset
+
+## Delivered Components
+
+## Analysis and Iterations
+
+
+## Code Structure
+
+
+
+
 - components
     - motivation & problem statement
     - problem statement details (dataset)

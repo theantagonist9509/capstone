@@ -41,6 +41,7 @@ IMAGE_SIZE      = 224          # EfficientNet-B0 default
 BATCH_SIZE      = 16
 NUM_WORKERS     = 2
 LEARNING_RATE   = 1e-4         # lower LR appropriate for fine-tuning
+BETA            = 1            # KL divergence weight
 NUM_EPOCHS      = 20
 LABEL_SMOOTHING = 0.3          # aggressive label smoothing
 DEVICE          = "cuda" if torch.cuda.is_available() else "cpu"
@@ -217,7 +218,9 @@ for epoch in range(start_epoch, NUM_EPOCHS + 1):
         imgs = batch["image"].to(DEVICE, non_blocking=True)
 
         reconstructions = model(imgs)
-        loss = criterion(reconstructions, imgs)
+        recon_loss = criterion(reconstructions, imgs)
+        kl_loss = -0.5 * torch.mean(1 + model.log_var - model.mu.pow(2) - model.log_var.exp())
+        loss = recon_loss + BETA * kl_loss
 
         optimizer.zero_grad()
         loss.backward()

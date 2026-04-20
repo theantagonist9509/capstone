@@ -285,8 +285,10 @@ class NVMELVAE(nn.Module):
     def encoder(self, x: torch.Tensor):
         features = self.features(x)
         mu = self.fc_mu(features)
+        self.mu = mu
         if self.training:
             log_var = self.fc_log_var(features)
+            self.log_var = log_var
             std = torch.exp(0.5 * log_var)
             eps = torch.randn_like(std)
             return mu + eps * std
