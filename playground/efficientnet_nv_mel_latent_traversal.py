@@ -27,8 +27,8 @@ print(f"Using device: {DEVICE}")
 VAL_ORIG_DATASET_DIR = "dataset/ISIC_2018/ISIC2018_Task3_Validation_Input"
 VAL_LABELS_CSV       = "dataset/ISIC_2018/ISIC2018_Task3_Validation_GroundTruth.csv"
 
-AE_CHECKPOINT_DIR  = "checkpoints/efficientnet_nv_mel_vae"
-CLS_CHECKPOINT_DIR = "checkpoints/efficientnet_nv_mel_classifier_pure_recon_vae"
+AE_CHECKPOINT_DIR  = "checkpoints/efficientnet_nv_mel_ae_ms_ssim"
+CLS_CHECKPOINT_DIR = "checkpoints/efficientnet_nv_mel_classifier_recon_ms_ssim"
 
 IMAGE_SIZE  = 224
 LABEL_NAMES = ["NV", "MEL"]
@@ -58,7 +58,7 @@ print(f"Validation (orig) set size: {len(val_orig_dataset)}")
 
 # %%
 # ── Load Best Checkpoints ─────────────────────────────────────────────────────
-ae_model = NVMELVAE(freeze_up_to=0).to(DEVICE)
+ae_model = NVMELAutoencoder(freeze_up_to=0).to(DEVICE)
 ae_ckpt  = load_best_model(
     ae_model,
     AE_CHECKPOINT_DIR,
