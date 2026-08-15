@@ -1,0 +1,379 @@
+\documentclass[conference,compsoc]{IEEEtran}
+
+\ifCLASSOPTIONcompsoc
+  \usepackage[nocompress]{cite}
+\else
+  \usepackage{cite}
+\fi
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{url}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+\hyphenation{op-tical net-works semi-conduc-tor}
+
+\begin{document}
+
+\title{Visualizing Medical Classifier Decision Boundaries via Latent Space Traversal}
+
+% \author{\IEEEauthorblockN{Tejas T. Singh}
+% \IEEEauthorblockA{IIT Patna\\
+% Bihta, Bihar, India\\
+% Email: tejas\_2301ai30@iitp.ac.in}}
+\author{
+   Anonymous submission 
+   
+}
+
+% \author{
+%  \IEEEauthorblockN{Tejas T. Singh}
+%     \IEEEauthorblockA{Dept. of Computer Science \& Eng.\\
+%     Indian Institute of Technology, Patna\\
+%     Email: tejas\_2301ai30@iitp.ac.in}
+%     \and
+% \IEEEauthorblockN{Rishu Kumar}
+% \IEEEauthorblockA{Dept. of Computer Science and Eng.\\
+% Indian Institute of Technology, Patna\\
+% Email:rishu\_2422cs04@iitp.ac.in}
+% \and
+% \IEEEauthorblockN{Shreya Yadav}
+% \IEEEauthorblockA{Dept. of Computer Science and Eng.\\
+% Indian Institute of Technology, Patna\\
+% Email:shreya\_2422cs20@iitp.ac.in}
+% \and
+%     \IEEEauthorblockN{Rajiv Misra}
+%     \IEEEauthorblockA{Dept. of Computer Science \& Eng.\\
+%     Indian Institute of Technology, Patna\\
+%     Email: rajivm@iitp.ac.in}
+
+%     \and
+%     \IEEEauthorblockN{Supratik Mukhopadhyay}
+%     \IEEEauthorblockA{Dept. of Environmental Sciences\\
+%    Louisiana State University
+% Baton Rouge, LA 70803 \\
+%     Email:mmukho1@lsu.edu}
+    
+   
+% }
+
+\maketitle
+
+\begin{abstract}
+We present a tool that helps clinicians judge whether to trust a binary skin lesion classifier. An EfficientNet-B0 autoencoder maps input images to a compact spatial latent space. We then traverse that space along two axes: a gradient axis, which moves classifier confidence toward a decision boundary, and a Principal Component Analysis (PCA) axis orthogonal to the gradient, which finds visually different images that hold confidence constant. Decoded frames along these paths reveal what can change while a prediction holds, and where it breaks. The key output is a boundary image; the nearest plausible image at which the classifier flips its label. To keep traversal images realistic, gradient steps are projected orthogonal to the reconstruction loss gradient, preventing out-of-distribution decodes. An interactive Gradio interface lets clinicians explore these paths, supported by Grad-CAM overlays and gamma-scaled difference maps. 
+% Source code is available at \url{https://github.com/theantagonist9509/capstone}.
+\end{abstract}
+\begin{IEEEkeywords}
+Interpretability, Latent Space, Autoencoder, Medical Classifier.
+\end{IEEEkeywords}
+
+\IEEEpeerreviewmaketitle
+
+\section{Introduction}
+
+Deep learning classifiers for medical imaging are often treated as black boxes. A clinician given a high-confidence prediction has little basis to decide whether to trust it. Explainability tools such as Grad-CAM \cite{gradcam} highlight which image regions drove a prediction, but they do not show how far an input sits from a decision boundary or what a boundary image looks like.
+We address this gap by encoding skin lesion images into a compact latent space and moving through that space to find where the classifier changes its mind. Two traversal modes are provided. The gradient axis changes classifier confidence at each step by following $\nabla_z \, \sigma(\text{logit}(z))$. The PCA axis moves sideways; along directions orthogonal to this gradient; to find visually distinct images that the classifier rates equally. Decoding both paths shows what the model considers irrelevant to its decision, and what it considers critical.
+We target binary classification of melanocytic nevus (NV) versus melanoma (MEL). This pair is clinically important, well-studied, and described by the ABCDE criteria (Asymmetry, Border, Color, Diameter, Evolution) that are visual enough for non-experts to interpret traversal results.
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{images/abcde.jpg}
+\caption{The ABCDE criteria for differentiating NV from MEL, as used by dermatologists. These visual rules make traversal results interpretable to non-experts \cite{abcde_melanoma_image}.}
+\label{fig:abcde}
+\end{figure}
+
+\section{Related Work}
+
+\subsection{Explainability in Medical Image Classifiers}
+
+Deep learning classifiers for medical imaging routinely outperform human experts on benchmark tasks, yet their opacity has slowed clinical adoption. Saliency-based methods such as Grad-CAM \cite{gradcam} and its variants produce heatmaps that highlight which pixels drove a prediction, and remain the most widely deployed explanation tools in practice. Perturbation-based methods such as LIME \cite{lime} and SHAP \cite{shap} take a different route: they fit local surrogate models or compute Shapley values to attribute a prediction to input features. Both families suffer from a shared limitation; they tell the clinician \emph{where} the model looked but not \emph{how far} the input sits from a different decision. Our work complements saliency maps by adding a Grad-CAM overlay to traversal frames but goes further, showing the nearest boundary image and the full path to it.
+
+\subsection{Counterfactual Explanations for Image Classifiers}
+
+Counterfactual explanations answer the question: what is the smallest change to an input that flips the model's label? For image classifiers, generating plausible counterfactuals is hard because the perturbation must stay on the natural image manifold. Early GAN-based approaches, including GANterfactual \cite{ganterfactual}, address this by training a conditional image-to-image translation network whose objective incorporates the target classifier, producing counterfactuals that look realistic. StyleGAN-based methods such as CheXplaining in Style \cite{chexstyle} manipulate disentangled latent directions in a pretrained generator to create clinically interpretable counterfactuals for chest X-rays. More recent work uses diffusion autoencoders \cite{daecf}: a linear classifier trained on the diffusion model's latent space defines a decision hyperplane, and counterfactuals are produced by moving along the normal to that hyperplane, supporting both binary and ordinal explanations. A parallel line of work extends counterfactual generation to 3D imaging; Cohen et al.\ \cite{latentshift} propose the Latent Shift method, which applies a gradient update directly in the latent space of a standard autoencoder to shift classifier confidence, and subsequent work adapts this approach to 3D CT volumes \cite{ct3d}. Our method is closest in spirit to Latent Shift: we also update a latent code via classifier gradients and decode the path. We differ by adding an orthogonal projection that keeps decoded frames on the learned manifold, providing a PCA traversal axis for iso-confidence exploration, and targeting skin lesion classification with a clinician-facing interactive interface.
+
+\subsection{Latent Space Traversal and Disentanglement}
+
+A body of work studies how to move through the latent spaces of generative models along semantically meaningful directions. GANSpace \cite{ganspace} discovers editing directions by applying PCA to the latent activations of a pretrained GAN, and the resulting axes correspond to interpretable visual attributes. InterFaceGAN \cite{interfacegan} trains a linear SVM in the latent space of StyleGAN to find the hyperplane separating two attribute classes, and moves along its normal to edit that attribute while leaving others fixed. SeFa \cite{sefa} finds editing directions in closed form by decomposing the weights of the generator's first layer. These methods are designed for unconditional generative models; they find directions that are meaningful across the whole latent space. Our work is different: we do not train a generative model for synthesis. Instead, we use a reconstruction autoencoder whose sole purpose is to support latent traversal, and we find directions that are meaningful with respect to a specific external classifier rather than to the generator's own structure. The PCA axis we compute in the complement of the classifier gradient is analogous to GANSpace, but computed on-the-fly relative to the gradient at the current latent point rather than globally across the model.
+
+\subsection{Skin Lesion Classification}
+
+The HAM10000 dataset \cite{ham10000}, released for the ISIC 2018 Task 3 challenge, contains 10,015 biopsy-confirmed dermoscopic images across seven diagnostic categories and remains the standard benchmark for multi-class skin lesion classification. EfficientNet \cite{efficientnet} has become the dominant backbone for this task: it scales depth, width, and resolution jointly, and its variants consistently outperform heavier architectures on ISIC benchmarks \cite{efficientnet_skin}. Transfer learning from ImageNet is standard, with the final classification head replaced by a task-specific linear layer, and weighted sampling or loss reweighting used to handle the severe class imbalance between melanoma and nevus \cite{ham10000_cls}. MelanomaNet \cite{melanomanet} adds interpretability to an EfficientNet V2 backbone by combining Grad-CAM++ attention, automated ABCDE criterion extraction, and Monte Carlo Dropout uncertainty quantification, showing that classification and explanation need not be in conflict. Our work sits in this line of research: we use EfficientNet-B0 as both the classifier backbone and the encoder of the reconstruction autoencoder, and we fine-tune the classifier on autoencoder reconstructions so that the gradient signal backpropagated through the decoder is calibrated to the model the clinician actually sees.
+
+\subsection{Variational Autoencoders and Manifold Smoothness}
+
+The variational autoencoder \cite{vae} introduced the reparameterization trick and a KL divergence regularizer that pulls the posterior toward a Gaussian prior, encouraging a smooth, connected latent manifold. Smooth manifolds are important for traversal because gradient steps on a rough manifold produce non-monotonic classifier confidence curves and decoded images that jump between unrelated visual modes. Subsequent work has shown that the degree of KL regularization controls a trade-off between reconstruction sharpness and latent smoothness \cite{vae}: stronger regularization produces smoother traversal at the cost of blurred reconstructions. We observe this trade-off directly: our baseline autoencoder with MSE loss produces the sharpest reconstructions but the roughest traversal, while the VAE produces smoother paths at the cost of softer decoded images.
+
+\section{Methodology}
+
+We encode an input image into a compact latent space, traverse that space
+along two complementary axes to find where the classifier changes its
+prediction, and decode each step back into image space for inspection.
+Fig.~\ref{fig:methodology} shows the full pipeline.
+Formally, let $f_{\text{enc}}$, $f_{\text{dec}}$, and $f_{\text{cls}}$
+denote the encoder, decoder, and classifier respectively, and let
+$z_0 = f_{\text{enc}}(x)$ be the latent code of an input image $x$.
+We seek a boundary point $z^*$ such that
+$f_{\text{dec}}(z^*)$ is the nearest plausible image at which
+$f_{\text{cls}}$ flips its label, subject to decoded frames remaining
+on the learned image manifold throughout the path.
+We find $z^*$ in three stages. First, we take gradient steps in $\mathcal{Z}$
+along the direction that increases classifier confidence most steeply
+(Section~\ref{sec:gradient}). Second, each step is projected to remove
+any component that would push the decoded image off the manifold, using
+the reconstruction loss gradient as a normal to the manifold at the
+current point (Section~\ref{sec:orthogonal}). Third, to explore the
+neighborhood of the boundary without crossing it, we move along PCA
+directions computed in the orthogonal complement of the classifier
+gradient across the validation set (Section~\ref{sec:pca}). Each decoded
+frame is visualized with a gamma-scaled difference overlay and a Grad-CAM
+saliency map (Section~\ref{sec:visualization}).
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{images/flowchart.png}
+\caption{Pipeline overview: an input image is encoded into $\mathcal{Z}$,
+traversed via projected gradient steps until the classifier flips, and
+decoded at each step for visualization. The PCA axis explores the
+boundary neighborhood at constant confidence.}
+\label{fig:methodology}
+\end{figure}
+\section{Dataset}
+
+\noindent \textit{Dataset Selection:}
+We initially targeted ISIC 2020, which contains 33,000 biopsy-confirmed images with binary labels. However, the malignant class accounted for only 1.7\% of the data. Even with a weighted loss, the classifier overfit the malignant training samples and failed to generalize. We switched to HAM10000 (ISIC 2018 Task 3), which has 10,015 images across 7 diagnostic categories. Collapsing to binary gives a more tractable malignant rate of approximately 20\%.
+We further restricted training to MEL ($n = 1{,}113$) vs.\ NV ($n = 6{,}705$) to keep the task binary and directly tied to the ABCDE criteria. The label set is defined in the ground-truth CSV using one-hot columns \texttt{[MEL, NV, BCC, AKIEC, BKL, DF, VASC]}, and only rows matching these two classes are retained.
+
+\noindent \textit{Data Loading:}
+The \texttt{ISIC2018Dataset} class provides lazy loading: images are read from disk one at a time inside \texttt{\_\_getitem\_\_}, so the full dataset never needs to fit in RAM. An optional \texttt{load\_into\_memory} flag caches all images upfront for faster iteration during traversal experiments. The class accepts a ground-truth CSV and a list of label columns to include, filtering image paths to only those that appear in the CSV. A companion \texttt{TransformDataset} wrapper applies separate augmentation pipelines to train and validation splits without duplicating file-loading code.
+
+\noindent \textit{Class Imbalance and Augmentation:}
+To handle the 6:1 NV-to-MEL imbalance, training uses \texttt{BCEWithLogitsLoss} with a \texttt{pos\_weight} term and weighted random sampling so that each mini-batch sees a balanced class distribution. Data augmentation includes random horizontal and vertical flips, random rotations, and colour jitter. Validation and traversal use a deterministic pipeline: resize to 256 pixels, centre-crop to $224 \times 224$, convert to tensor, and normalize with ImageNet statistics ($\mu = [0.485, 0.456, 0.406]$, $\sigma = [0.229, 0.224, 0.225]$).
+
+\section{Model Architectures}
+
+\noindent \textit{Classifier:}
+The classifier is an EfficientNet-B0 \cite{efficientnet} backbone pretrained on ImageNet, with its default classification head replaced by a Dropout$(p{=}0.2)$ layer followed by a single linear unit mapping from 1280 to 1 output logit (NV vs.\ MEL). During training, early backbone stages can be frozen by specifying a \texttt{freeze\_up\_to} index over the eight feature stages (stem through head conv). A logit greater than zero is predicted as MEL. The use of label-smoothing to prevent a steep decision boundary is explored. A grayscale variant (\texttt{GrayscaleNVMELClassifier}) adapts the stem by summing the pretrained first convolution's weights across the three input channels into a single-channel kernel, preserving the pretrained feature statistics.
+
+\noindent \textit{Autoencoder:}
+The \texttt{NVMELAutoencoder} uses the same EfficientNet-B0 \texttt{features} block as the encoder. For a $224 \times 224$ RGB input, the encoder outputs a $(B, 1280, 7, 7)$ spatial feature map. The decoder is a symmetric stack of five \texttt{ConvTranspose2d} layers, each followed by batch normalization and ReLU, that progressively upsample from $7 \times 7$ back to $224 \times 224$:
+\begin{equation}
+\begin{aligned}
+1280 &\xrightarrow{4 \times 4,\ s2} 512 
+     &\xrightarrow{4 \times 4,\ s2} 256 \\
+     &\xrightarrow{4 \times 4,\ s2} 128 
+     &\xrightarrow{4 \times 4,\ s2} 64 \\
+     &\xrightarrow{4 \times 4,\ s2} 3
+\end{aligned}
+\end{equation}
+The final layer has no activation, so outputs are in the normalized image space consistent with the classifier's input distribution.
+
+\noindent \textit{Variational Autoencoder:}
+The \texttt{NVMELVAE} extends the autoencoder with a spatial variational bottleneck. Two $1 \times 1$ convolutional heads project the $(B, 1280, 7, 7)$ encoder output to a mean map $\mu \in \mathbb{R}^{B \times d \times 7 \times 7}$ and a log-variance map $\log \sigma^2 \in \mathbb{R}^{B \times d \times 7 \times 7}$, where $d$ is the latent dimension (default 1024). During training, a latent sample is drawn via the reparameterization trick:
+\begin{equation}
+   z = \mu + \epsilon \odot \exp\!\left(\tfrac{1}{2} \log \sigma^2\right), \quad \epsilon \sim \mathcal{N}(0, I) 
+\end{equation}
+At inference, $z = \mu$ directly. The decoder mirrors the autoencoder's structure, reading from $d$ channels, with a final Sigmoid activation to bound outputs to $[0, 1]$. The training loss adds a KL term:
+\begin{equation}
+    \mathcal{L}_{\text{KL}} = -\tfrac{1}{2} \mathbb{E}\!\left[1 + \log \sigma^2 - \mu^2 - \exp(\log \sigma^2)\right]
+\end{equation}
+The VAE's KL regularization encourages a smoother latent manifold, which reduces non-monotonic classifier confidence during traversal at the cost of slightly lower reconstruction sharpness.
+
+\section{Latent Space Traversal}
+
+\subsection{Gradient Axis}
+\label{sec:gradient}
+
+The gradient traversal optimizes the latent code $z$ to move the classifier's output toward the decision boundary. At each step, the gradient of the classifier logit with respect to $z$ is computed by decoding $z$ and backpropagating through both the decoder and the classifier:
+\begin{equation}
+    G = \nabla_z \; f_{\text{cls}}\!\left(f_{\text{dec}}(z)\right)
+\end{equation}
+The direction of travel is determined by the initial prediction: steps move \emph{along} $G$ for NV images (pushing toward MEL) and \emph{against} $G$ for MEL images (pushing toward NV). An Adam optimizer updates $z$ at each step with a default learning rate of 0.05. The gradient is recomputed at every step so it tracks the local manifold geometry, which matters because the vanilla AE latent space has no smoothness incentive between in-distribution points. Traversal stops when the predicted probability crosses a configurable threshold (default 0.75) past the decision boundary.
+
+\subsection{Orthogonal Projection}
+\label{sec:orthogonal}
+Unconstrained gradient steps often push $z$ off the learned manifold, producing decoded images with synthetic colour artifacts. To address this, we project each gradient step to be orthogonal to the reconstruction loss gradient $V = \nabla_z \, \mathcal{L}_{\text{recon}}(z)$, where the reconstruction error is the MS-SSIM loss between $f_{\text{dec}}(z)$ and $f_{\text{dec}}(f_{\text{enc}}(f_{\text{dec}}(z)))$. The projection is:
+\begin{equation}
+ G \leftarrow G - \frac{G^\top V}{\|V\|^2} V   
+\end{equation}
+This removes the component of the classifier gradient that increases reconstruction error, keeping decoded images on or near the learned image manifold. The encoder pass in $V$ is detached so gradients only flow through the first decoder call, preventing interference between the two gradient computations.
+\subsection{PCA Axis}
+\label{sec:pca}
+The PCA traversal moves sideways in latent space: it finds directions that are orthogonal to the classifier gradient and span maximum variance across the validation set's embeddings. Given a batch of encoded validation images $X \in \mathbb{R}^{B \times d}$ and the classifier gradient $G$ as the reference vector, the method (implemented in \texttt{get\_orthogonal\_pca\_bases}) first removes from each embedding its projection onto $G$:
+\begin{equation}
+    X_{\perp} = X - \frac{X G^\top}{\|G\|^2} G
+\end{equation}
+It then mean-centers $X_\perp$ and takes the top-$k$ right singular vectors via full SVD. These form the PCA bases in the orthogonal complement of $G$. Stepping along these bases at each iteration keeps the classifier score approximately constant while moving the image through visually distinct configurations that are well-supported by the training distribution.
+\subsection{Visualization}
+\label{sec:visualization}
+Each traversal frame is decoded from the updated $z$ and unnormalized back to RGB using the ImageNet statistics. The visualization layout shows the full traversal strip in a top row and a four-panel comparison in a bottom row. The comparison panels show: the original reconstruction, the final reconstruction, a luminance-weighted scalar difference map (computed as $(I_{\text{final}} - I_{\text{orig}}) \cdot [0.299, 0.587, 0.114]^\top$, displayed with a diverging colormap), and a per-channel gamma-scaled overlay. The overlay computes the signed per-channel difference, compresses its magnitude with $\gamma = 0.5$ (preserving sign), normalizes each channel to $[0,1]$, and blends with the original at $\alpha = 0.6$:
+\begin{equation}
+    \text{overlay} = (1 - \alpha) \cdot I_{\text{orig}} + \alpha \cdot H_\gamma
+\end{equation}
+This makes subtle changes visible even when the orthogonal constraint keeps traversal steps small.
+
+\section{Reconstruction Quality Refinements}
+
+Good traversal requires the autoencoder to reconstruct images faithfully enough that the classifier performs similarly on reconstructions as on originals. Early iterations fell short of this.
+
+\subsection{Baseline Autoencoder}
+The baseline AE with mean squared error (MSE) loss produced heavily blurred reconstructions. Classifier performance on these reconstructions was significantly worse than on originals, which undermines traversal because the gradient signal backpropagated through the decoder reflects a corrupted view of the image.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{images/ae.png}
+\caption{Baseline AE reconstructions with MSE loss. The output is excessively blurry, degrading classifier performance on reconstructed images.}
+\label{fig:ae}
+\end{figure}
+
+\subsection{VGG Perceptual Loss}
+
+Replacing MSE with VGG-based perceptual loss \cite{vggloss} improved sharpness and classifier performance on reconstructions, but the results still fell short of our target. Perceptual loss matches feature distributions in VGG's intermediate layers, encouraging texture consistency rather than pixel-level accuracy.
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{images/ae-vgg.png}
+\caption{AE reconstructions with VGG perceptual loss. Sharpness improves over baseline MSE but classifier performance on reconstructions remains below target.}
+\label{fig:ae-vgg}
+\end{figure}
+
+\subsection{MS-SSIM Loss}
+
+MS-SSIM loss \cite{msssim} outperformed VGG loss on both reconstruction sharpness and classifier performance on reconstructed images. MS-SSIM measures structural similarity across multiple scales, making it more sensitive to clinically relevant texture and edge detail. This is the loss used in our final traversal pipeline. Some gap between original and reconstructed classifier performance remains; future work may close it by combining MS-SSIM and VGG terms or adopting a GAN-style decoder.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{images/ae-ms-ssim.png}
+\caption{AE reconstructions with MS-SSIM loss. This yields the best reconstruction quality and classifier performance among the losses tested.}
+\label{fig:ae-ms-ssim}
+\end{figure}
+
+\section{Classifier Refinements}
+
+\subsection{EfficientNet-B2}
+
+To test whether a larger encoder backbone would improve classification, we trained an EfficientNet-B2 classifier alongside the B0 baseline. Even with heavy regularisation (dropout $p = 0.4$), B2 validation performance was worse than B0, as shown in Fig.~\ref{fig:b0} and Fig.~\ref{fig:b2}. B0 is strictly superior across all tracked metrics. This points to a lack of data: the additional capacity of B2 cannot be used productively when the training set is this small, and the extra parameters overfit despite the added dropout. All subsequent experiments use B0.
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{images/b0.png}
+\caption{EfficientNet-B0 validation performance. Metrics are stable and consistently higher than the B2 variant.}
+\label{fig:b0}
+\end{figure}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{images/b2.png}
+\caption{EfficientNet-B2 validation performance with $p = 0.4$ dropout. Despite heavier regularisation, B2 underperforms B0, indicating the dataset is too small to benefit from the larger backbone.}
+\label{fig:b2}
+\end{figure}
+
+\subsection{Label Smoothing}
+
+Without label smoothing, a binary cross-entropy objective can drive logits to large positive and negative values. A steep decision boundary that passes through latent space in a near-vertical wall makes traversal steps large and imprecise; the classifier flips its label abruptly rather than smoothly. Label smoothing replaces hard $\{0, 1\}$ targets with soft targets $\{\epsilon/2,\, 1 - \epsilon/2\}$, which means the optimal logit for any class is finite. This bounds the logits and prevents the decision boundary from becoming excessively steep.
+Label smoothing does not guarantee a unimodal class-probability distribution, and a bimodal distribution of predicted probabilities may persist if the data itself clusters into two well-separated groups. But by keeping logits bounded, it removes the incentive for the model to push every prediction toward near-zero or near-one confidence, which is a prerequisite for a traversable boundary. Fig.~\ref{fig:no-ls} and Fig.~\ref{fig:ls} show the effect on the predicted-probability distribution before and after label smoothing is applied.
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{images/no-ls.png}
+\caption{Predicted class-probability distribution without label smoothing. Logits are pushed to extremes, concentrating predictions near zero and one.}
+\label{fig:no-ls}
+\end{figure}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{images/ls.png}
+\caption{Predicted class-probability distribution with label smoothing ($\epsilon = 0.3$) applied. Logits are bounded, spreading predictions across a wider range and producing a less steep decision boundary.}
+\label{fig:ls}
+\end{figure}
+\subsection{Fine-Tuning on Reconstructions}
+
+Ideally, the classifier would remain untouched: a clinician-facing tool should explain the predictions of a fixed, independently trained model rather than one adapted to suit the pipeline. In practice, a classifier trained on clean images responds poorly to AE distortions, producing gradient signals that reflect reconstruction noise rather than lesion features. Due to compute and time constraints, we fine-tuned the classifier directly on AE reconstructions to correct for this, at the cost of explaining a model that has learned to tolerate those distortions rather than the intended one. This bounds the experiment to a slightly weaker result, but provides a solid sanity check that the research direction is sound. Decoupling the classifier from the AE is a clear target for future work.
+\section{Traversal Refinements}
+
+\subsection{VAE for Manifold Smoothness}
+Early AE traversals showed non-monotonic classifier confidence along the gradient direction, suggesting the latent manifold was rough. Switching to the VAE improved smoothness, as the KL regularization pulls the latent distribution toward a Gaussian prior and discourages gaps and discontinuities in the latent space.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{images/vae.png}
+\caption{VAE reconstructions. The smoother latent manifold reduces non-monotonic confidence during traversal at the cost of slightly softer reconstructions compared to the AE.}
+\label{fig:vae}
+\end{figure}
+
+\subsection{Grayscale Training}
+
+We tested training on grayscale images to reduce colour artifacts in traversed frames. The grayscale variants of both the classifier and AE adapted the EfficientNet-B0 stem by summing the three input channel weights into one. However, grayscale classifier performance was worse than RGB, and the approach was abandoned.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{images/artifacts.png}
+\caption{Colour artifacts observed during unconstrained RGB traversal. These synthetic-looking colours indicate out-of-distribution decoded images.}
+\label{fig:artifacts}
+\end{figure}
+
+\subsection{Orthogonal Traversal}
+
+The orthogonal projection described in Section~\ref{sec:orthogonal} was the most effective fix for colour artifacts. Out-of-distribution decoded images incur a large reconstruction loss gradient; projecting away from this gradient keeps decoded images on the learned image manifold, eliminating most synthetic-looking artifacts.
+\subsection{Difference Map Overlay}
+
+Because the orthogonal constraint reduces visible changes between traversal steps, a gamma-scaled per-channel difference overlay is blended onto the original image to highlight subtle but meaningful changes. The $\gamma = 0.5$ compression amplifies small differences while the signed treatment preserves both the direction and spatial location of changes.
+
+\subsection{Interpolation with Grad-CAM}
+We added a latent-space interpolation feature that linearly mixes the latent codes of two validation-set images and decodes the resulting path. At each interpolation step, Grad-CAM \cite{gradcam} highlights which image regions drive the classifier's prediction, giving spatial attribution alongside confidence scores. This makes the latent space structure more transparent: the user can observe how classifier attention shifts smoothly as the image morphs from one example to another.
+
+\section{Interactive GUI}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{images/gui-trav.png}
+\caption{The Gradio-based interactive traversal interface. Users select an image and control traversal direction, step size, and the orthogonal constraint in real time.}
+\label{fig:gui-trav}
+\end{figure}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{images/gui-interpol.png}
+\caption{The interpolation view of the GUI. Grad-CAM overlays show which regions drive the classifier's prediction at each point along the interpolation path.}
+\label{fig:gui-interpol}
+\end{figure}
+
+The interactive web interface is built with Gradio. It gives a clinician three modes. In gradient traversal mode, the tool encodes a chosen validation image, takes up to 30 gradient steps (configurable) toward the decision boundary, and displays the decoded frames with classifier probability, reconstruction error, and gradient norm annotated at each step. In PCA traversal mode, the tool moves the latent code along the top PCA basis of the validation set embeddings orthogonal to the gradient, holding classifier score approximately constant while varying image appearance. In interpolation mode, the tool linearly interpolates between the latent codes of two chosen validation images, decoding each intermediate point and overlaying Grad-CAM attention maps.
+All three modes update in real time. The orthogonal constraint can be toggled on or off at any point, letting the user compare in-manifold and unconstrained traversal side by side.
+
+\section{Results}
+
+The orthogonal projection described in Section~\ref{sec:orthogonal} keeps traversal images on the learned manifold, but it comes at a cost: the constraint suppresses visible change so strongly that the latent traversal image is hard to distinguish from the original's reconstruction by eye. This is the price paid to avoid the colour artifacts shown in Fig.~\ref{fig:artifacts}. Whether this trade-off is acceptable depends on how much the orthogonal component can be culled without re-introducing artifacts; future work may explore projecting away only a fraction of the reconstruction-loss gradient rather than removing it entirely.
+A more promising signal comes from the gamma-scaled difference map between the latent traversal image and the original's reconstruction. Although the raw decoded frames look nearly identical, the amplified per-channel differences correlate spatially with the Grad-CAM activation of the classifier, as shown in Fig.~\ref{fig:gamma-diff-gradcam}. Both maps highlight the same lesion regions, suggesting that the traversal step does move the latent code in a direction the classifier responds to, even when the decoded change is too subtle for the naked eye.
+\begin{figure}[!t]
+\centering
+\begin{minipage}[t]{0.48\columnwidth}
+    \centering
+    \includegraphics[width=\linewidth]{images/gamma-diff.png}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.48\columnwidth}
+    \centering
+    \includegraphics[width=\linewidth]{images/gradcam.png}
+\end{minipage}
+\caption{Left: gamma-scaled difference map ($\gamma = 0.5$) between the latent traversal image and the original's reconstruction, localised to the lesion region. Right: Grad-CAM activation of the classifier on the traversal image. The spatial overlap of the two maps suggests the traversal moves latent codes along directions the classifier is sensitive to.}
+\label{fig:gamma-diff-gradcam}
+\end{figure}
+This correspondence between the difference map and Grad-CAM is the main empirical finding of this paper. The traversal images are not visually compelling on their own, and by that measure the result is weak. But the method's underlying logic holds: gradient steps in latent space do shift classifier-relevant features, and the difference map makes those shifts visible where the decoder cannot. This is enough to warrant further exploration of the approach, particularly with stronger decoders, partial orthogonal projection, and a larger dataset.
+
+\section{Code Structure}
+
+The codebase separates core definitions from executable scripts:
+\begin{itemize}
+\item \texttt{models.py}: EfficientNet-B0 classifier, AE, and VAE architecture definitions.
+\item \texttt{datasets.py}: \texttt{ISIC2018Dataset} and \texttt{ISIC2020Dataset} with lazy loading and optional in-memory caching; \texttt{TransformDataset} wrapper for per-split augmentation.
+\item \texttt{losses.py}: \texttt{VGGLoss} (perceptual) and \texttt{MS\_SSIMLoss} (structural similarity) with denormalization support.
+\item \texttt{utils.py}: Checkpoint loading (\texttt{load\_best\_model}) and orthogonal PCA basis computation (\texttt{get\_orthogonal\_pca\_bases}) via \texttt{torch.linalg.svd}.
+\item \texttt{playground/}: Standalone training, evaluation, dataset generation, traversal, and GUI scripts.
+\end{itemize}
+
+
+\section{Conclusion}
+We built a tool that encodes skin lesion images into a latent space and traverses it to expose a binary classifier's decision boundary. The core output; a boundary image at the point where the classifier flips; gives a clinician a direct visual basis to judge whether to trust a prediction. MS-SSIM reconstruction loss, orthogonal gradient projection, and fine-tuning on reconstructions together produce a usable system. The Gradio interface makes the latent space interactive without requiring any machine learning knowledge from the clinician. Future work includes combining VGG and MS-SSIM losses, exploring GAN-style decoders for sharper reconstructions, extending to multiclass settings, and conducting a formal user study with dermatologists.
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}
