@@ -1,4 +1,5 @@
 \documentclass[conference,compsoc]{IEEEtran}
+\IEEEoverridecommandlockouts
 
 \ifCLASSOPTIONcompsoc
   \usepackage[nocompress]{cite}
@@ -12,58 +13,47 @@
 \usepackage{url}
 \usepackage{algorithm}
 \usepackage{algorithmic}
+\usepackage{hyperref}
 
 \hyphenation{op-tical net-works semi-conduc-tor}
 
 \begin{document}
 
-\title{Visualizing Medical Classifier Decision Boundaries via Latent Space Traversal}
+\title{Visualizing Medical Classifier Decision Boundaries via Latent Space Traversal\thanks{Code available at \protect\url{https://github.com/theantagonist9509/capstone}.}}
 
-% \author{\IEEEauthorblockN{Tejas T. Singh}
-% \IEEEauthorblockA{IIT Patna\\
-% Bihta, Bihar, India\\
-% Email: tejas\_2301ai30@iitp.ac.in}}
 \author{
-   Anonymous submission 
-   
+ \IEEEauthorblockN{Tejas T. Singh}
+    \IEEEauthorblockA{Dept. of Computer Science \& Eng.\\
+    Indian Institute of Technology, Patna\\
+    Email: \href{mailto:tejas_2301ai30@iitp.ac.in}{tejas\_2301ai30@iitp.ac.in}}
+    \and
+\IEEEauthorblockN{Rishu Kumar}
+\IEEEauthorblockA{Dept. of Computer Science and Eng.\\
+Indian Institute of Technology, Patna\\
+Email: \href{mailto:rishu_2422cs04@iitp.ac.in}{rishu\_2422cs04@iitp.ac.in}}
+\and
+\IEEEauthorblockN{Shreya Yadav}
+\IEEEauthorblockA{Dept. of Computer Science and Eng.\\
+Indian Institute of Technology, Patna\\
+Email: \href{mailto:shreya_2422cs20@iitp.ac.in}{shreya\_2422cs20@iitp.ac.in}}
+\and
+    \IEEEauthorblockN{Rajiv Misra}
+    \IEEEauthorblockA{Dept. of Computer Science \& Eng.\\
+    Indian Institute of Technology, Patna\\
+    Email: \href{mailto:rajivm@iitp.ac.in}{rajivm@iitp.ac.in}}
+
+    \and
+    \IEEEauthorblockN{Supratik Mukhopadhyay}
+    \IEEEauthorblockA{Dept. of Environmental Sciences\\
+   Louisiana State University
+Baton Rouge, LA 70803 \\
+    Email: \href{mailto:mmukho1@lsu.edu}{mmukho1@lsu.edu}}
 }
-
-% \author{
-%  \IEEEauthorblockN{Tejas T. Singh}
-%     \IEEEauthorblockA{Dept. of Computer Science \& Eng.\\
-%     Indian Institute of Technology, Patna\\
-%     Email: tejas\_2301ai30@iitp.ac.in}
-%     \and
-% \IEEEauthorblockN{Rishu Kumar}
-% \IEEEauthorblockA{Dept. of Computer Science and Eng.\\
-% Indian Institute of Technology, Patna\\
-% Email:rishu\_2422cs04@iitp.ac.in}
-% \and
-% \IEEEauthorblockN{Shreya Yadav}
-% \IEEEauthorblockA{Dept. of Computer Science and Eng.\\
-% Indian Institute of Technology, Patna\\
-% Email:shreya\_2422cs20@iitp.ac.in}
-% \and
-%     \IEEEauthorblockN{Rajiv Misra}
-%     \IEEEauthorblockA{Dept. of Computer Science \& Eng.\\
-%     Indian Institute of Technology, Patna\\
-%     Email: rajivm@iitp.ac.in}
-
-%     \and
-%     \IEEEauthorblockN{Supratik Mukhopadhyay}
-%     \IEEEauthorblockA{Dept. of Environmental Sciences\\
-%    Louisiana State University
-% Baton Rouge, LA 70803 \\
-%     Email:mmukho1@lsu.edu}
-    
-   
-% }
 
 \maketitle
 
 \begin{abstract}
 We present a tool that helps clinicians judge whether to trust a binary skin lesion classifier. An EfficientNet-B0 autoencoder maps input images to a compact spatial latent space. We then traverse that space along two axes: a gradient axis, which moves classifier confidence toward a decision boundary, and a Principal Component Analysis (PCA) axis orthogonal to the gradient, which finds visually different images that hold confidence constant. Decoded frames along these paths reveal what can change while a prediction holds, and where it breaks. The key output is a boundary image; the nearest plausible image at which the classifier flips its label. To keep traversal images realistic, gradient steps are projected orthogonal to the reconstruction loss gradient, preventing out-of-distribution decodes. An interactive Gradio interface lets clinicians explore these paths, supported by Grad-CAM overlays and gamma-scaled difference maps. 
-% Source code is available at \url{https://github.com/theantagonist9509/capstone}.
 \end{abstract}
 \begin{IEEEkeywords}
 Interpretability, Latent Space, Autoencoder, Medical Classifier.
@@ -75,7 +65,7 @@ Interpretability, Latent Space, Autoencoder, Medical Classifier.
 
 Deep learning classifiers for medical imaging are often treated as black boxes. A clinician given a high-confidence prediction has little basis to decide whether to trust it. Explainability tools such as Grad-CAM \cite{gradcam} highlight which image regions drove a prediction, but they do not show how far an input sits from a decision boundary or what a boundary image looks like.
 We address this gap by encoding skin lesion images into a compact latent space and moving through that space to find where the classifier changes its mind. Two traversal modes are provided. The gradient axis changes classifier confidence at each step by following $\nabla_z \, \sigma(\text{logit}(z))$. The PCA axis moves sideways; along directions orthogonal to this gradient; to find visually distinct images that the classifier rates equally. Decoding both paths shows what the model considers irrelevant to its decision, and what it considers critical.
-We target binary classification of melanocytic nevus (NV) versus melanoma (MEL). This pair is clinically important, well-studied, and described by the ABCDE criteria (Asymmetry, Border, Color, Diameter, Evolution) that are visual enough for non-experts to interpret traversal results.
+We target binary classification of melanocytic nevus (NV) versus melanoma (MEL). This pair is clinically important, well-studied, and described by the ABCDE criteria (Asymmetry, Border, Color, Diameter, Evolution), which give non-experts a visual vocabulary for judging traversal results.
 \begin{figure}[!t]
 \centering
 \includegraphics[width=\columnwidth]{images/abcde.jpg}
@@ -213,8 +203,9 @@ Each traversal frame is decoded from the updated $z$ and unnormalized back to RG
 This makes subtle changes visible even when the orthogonal constraint keeps traversal steps small.
 
 \section{Reconstruction Quality Refinements}
+\label{sec:reconstruction-refinements}
 
-Good traversal requires the autoencoder to reconstruct images faithfully enough that the classifier performs similarly on reconstructions as on originals. Early iterations fell short of this.
+Good traversal requires the autoencoder to reconstruct images faithfully enough that the classifier performs similarly on reconstructions as on originals. Early iterations fell short of this: a baseline autoencoder produced reconstructions too blurred for the classifier to trust, which a perceptual loss sharpened only partially, and a structural similarity loss finally closed the gap. The three subsections below trace that progression.
 
 \subsection{Baseline Autoencoder}
 The baseline AE with mean squared error (MSE) loss produced heavily blurred reconstructions. Classifier performance on these reconstructions was significantly worse than on originals, which undermines traversal because the gradient signal backpropagated through the decoder reflects a corrupted view of the image.
@@ -341,37 +332,42 @@ All three modes update in real time. The orthogonal constraint can be toggled on
 \section{Results}
 
 The orthogonal projection described in Section~\ref{sec:orthogonal} keeps traversal images on the learned manifold, but it comes at a cost: the constraint suppresses visible change so strongly that the latent traversal image is hard to distinguish from the original's reconstruction by eye. This is the price paid to avoid the colour artifacts shown in Fig.~\ref{fig:artifacts}. Whether this trade-off is acceptable depends on how much the orthogonal component can be culled without re-introducing artifacts; future work may explore projecting away only a fraction of the reconstruction-loss gradient rather than removing it entirely.
-A more promising signal comes from the gamma-scaled difference map between the latent traversal image and the original's reconstruction. Although the raw decoded frames look nearly identical, the amplified per-channel differences correlate spatially with the Grad-CAM activation of the classifier, as shown in Fig.~\ref{fig:gamma-diff-gradcam}. Both maps highlight the same lesion regions, suggesting that the traversal step does move the latent code in a direction the classifier responds to, even when the decoded change is too subtle for the naked eye.
+A more promising signal comes from the gamma-scaled difference map between the latent traversal image and the original's reconstruction. Although the raw decoded frames look nearly identical, the amplified per-channel differences correlate spatially with the Grad-CAM activation of the classifier in some cases but not others, as shown in Fig.~\ref{fig:gamma-diff-gradcam}. Where the two maps agree, it suggests the traversal step moves the latent code in a direction the classifier responds to, even when the decoded change is too subtle for the naked eye; where they disagree, the reasons are discussed below.
 \begin{figure}[!t]
 \centering
 \begin{minipage}[t]{0.48\columnwidth}
     \centering
-    \includegraphics[width=\linewidth]{images/gamma-diff.png}
+    \includegraphics[width=\linewidth]{images/gamma-diff-good.png}
 \end{minipage}
 \hfill
 \begin{minipage}[t]{0.48\columnwidth}
     \centering
-    \includegraphics[width=\linewidth]{images/gradcam.png}
+    \includegraphics[width=\linewidth]{images/gradcam-good.png}
 \end{minipage}
-\caption{Left: gamma-scaled difference map ($\gamma = 0.5$) between the latent traversal image and the original's reconstruction, localised to the lesion region. Right: Grad-CAM activation of the classifier on the traversal image. The spatial overlap of the two maps suggests the traversal moves latent codes along directions the classifier is sensitive to.}
+\\[6pt]
+\begin{minipage}[t]{0.48\columnwidth}
+    \centering
+    \includegraphics[width=\linewidth]{images/gamma-diff-poor.png}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.48\columnwidth}
+    \centering
+    \includegraphics[width=\linewidth]{images/gradcam-poor.png}
+\end{minipage}
+\caption{Gamma-scaled difference maps (left of each pair) against Grad-CAM activations (right of each pair), for two validation images. Top row: a case where the two maps highlight the same lesion region. Bottom row: a case where they diverge, illustrating that the correlation does not hold consistently.}
 \label{fig:gamma-diff-gradcam}
 \end{figure}
-This correspondence between the difference map and Grad-CAM is the main empirical finding of this paper. The traversal images are not visually compelling on their own, and by that measure the result is weak. But the method's underlying logic holds: gradient steps in latent space do shift classifier-relevant features, and the difference map makes those shifts visible where the decoder cannot. This is enough to warrant further exploration of the approach, particularly with stronger decoders, partial orthogonal projection, and a larger dataset.
+This correspondence between the difference map and Grad-CAM is the main empirical finding of this paper, but the correlation is not strong, and two factors likely explain why. First, the two maps are built from different signals: Grad-CAM pools gradients over a deep convolutional layer to weight its activation maps, which smooths out much of the noise that raw pixel-space gradients carry, while the gamma-scaled difference map is computed directly in pixel space and has no such smoothing. Some mismatch between the two is expected simply because they are reading the model at different depths. Second, Section~\ref{sec:reconstruction-refinements} shows the classifier does not yet perform as well on reconstructed images as it does on originals; on a poorly reconstructed image, Grad-CAM and the difference map may each be picking up on different decoder noise artifacts rather than the same lesion feature, which would explain why some samples show weaker overlap than others. Fig.~\ref{fig:gamma-diff-gradcam} shows one case of each, annotated accordingly.
 
-\section{Code Structure}
+This points to what the method actually delivers. The boundary image is the nearest point at which the classifier itself changes its answer, found and verified inside the classifier's own decision space. It is not yet shown to be the nearest point a clinician would recognise as a different case by eye; that would need the decoded image to change visibly, which the orthogonal constraint currently suppresses. The traversal images are not visually compelling on their own, and by that measure the result is weak. But the method's underlying logic holds: gradient steps in latent space do shift classifier-relevant features, and the difference map makes those shifts visible where the decoder cannot. This is enough to warrant further exploration of the approach, particularly with stronger decoders, partial orthogonal projection, and a larger dataset.
 
-The codebase separates core definitions from executable scripts:
-\begin{itemize}
-\item \texttt{models.py}: EfficientNet-B0 classifier, AE, and VAE architecture definitions.
-\item \texttt{datasets.py}: \texttt{ISIC2018Dataset} and \texttt{ISIC2020Dataset} with lazy loading and optional in-memory caching; \texttt{TransformDataset} wrapper for per-split augmentation.
-\item \texttt{losses.py}: \texttt{VGGLoss} (perceptual) and \texttt{MS\_SSIMLoss} (structural similarity) with denormalization support.
-\item \texttt{utils.py}: Checkpoint loading (\texttt{load\_best\_model}) and orthogonal PCA basis computation (\texttt{get\_orthogonal\_pca\_bases}) via \texttt{torch.linalg.svd}.
-\item \texttt{playground/}: Standalone training, evaluation, dataset generation, traversal, and GUI scripts.
-\end{itemize}
-
+\section{Limitations}
+Three questions remain open and would need more work than this paper covers. First, boundary-image plausibility was not measured quantitatively; a distributional check such as the Fr\'echet Inception Distance (FID), which compares the feature statistics of two image sets to score how close a generated set is to a set of real images \cite{fid}, would show whether decoded boundaries stay close to the true image manifold rather than only avoiding the colour artifacts of Fig.~\ref{fig:artifacts}. Second, no clinician has reviewed the boundary or traversal images; the tool is described as clinician-facing by design, not by evaluation. Third, Fig.~\ref{fig:gamma-diff-gradcam} shows the difference-map/Grad-CAM correspondence holds for one example and not another; a quantitative overlap metric such as IoU or cosine similarity, measured across the full validation set, would give a clearer picture of how often it holds, though such a metric would inherit the same limitation discussed above: it would still be comparing a pixel-space map against a deep-layer activation map, on reconstructions the classifier has not yet mastered, so a low score would not on its own separate a true mismatch from an artefact of the metric itself.
 
 \section{Conclusion}
-We built a tool that encodes skin lesion images into a latent space and traverses it to expose a binary classifier's decision boundary. The core output; a boundary image at the point where the classifier flips; gives a clinician a direct visual basis to judge whether to trust a prediction. MS-SSIM reconstruction loss, orthogonal gradient projection, and fine-tuning on reconstructions together produce a usable system. The Gradio interface makes the latent space interactive without requiring any machine learning knowledge from the clinician. Future work includes combining VGG and MS-SSIM losses, exploring GAN-style decoders for sharper reconstructions, extending to multiclass settings, and conducting a formal user study with dermatologists.
+We built a tool that encodes skin lesion images into a latent space and traverses it to expose a binary classifier's decision boundary. The core output is a boundary image at the point where the classifier flips label. As it stands, this boundary is defined and verified in the classifier's own decision space; it is not yet shown to be a boundary a clinician would recognise as visually distinct, since the current decoder keeps changes small enough that the difference map, not the raw image, carries most of the signal. Closing that gap is the paper's main open problem. MS-SSIM reconstruction loss, orthogonal gradient projection, and fine-tuning on reconstructions together produce a usable system. The Gradio interface makes the latent space interactive without requiring any machine learning knowledge from the clinician.
+
+Future work includes combining VGG and MS-SSIM losses and extending to multiclass settings. A GAN-style decoder is a natural next step for sharper reconstructions: an adversarial loss pushes toward the sharp, realistic textures that MS-SSIM alone under-delivers, which is the likely reason current traversal frames are hard to tell apart by eye, and would also raise classifier performance on reconstructions, in turn strengthening the difference-map/Grad-CAM correlation. The trade-off is training stability; with roughly 1,100 melanoma images, an adversarial objective risks mode collapse or memorisation rather than the reconstruction gains it is meant to deliver, and would need care to apply safely. The diffusion-autoencoder approach discussed in Related Work \cite{daecf} is a possible alternative route to sharper decodes without an adversarial objective. Beyond the decoder, the three limitations above point to the most useful next steps: a distributional plausibility check on boundary images, a small clinician review, and a quantitative spatial-overlap metric between the difference map and Grad-CAM across the full validation set.
 
 \bibliographystyle{IEEEtran}
 \bibliography{references}
