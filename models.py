@@ -20,7 +20,7 @@ from torchvision import transforms, models
 # Backbone i/o: backbone.features -> backbone.avgpool -> backbone.classifier
 
 class NVMELClassifier(nn.Module):
-    def __init__(self, freeze_up_to):
+    def __init__(self, freeze_up_to, num_classes=1):
         super().__init__()
 
         self.backbone = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
@@ -28,19 +28,21 @@ class NVMELClassifier(nn.Module):
             for param in self.backbone.features[i].parameters():
                 param.requires_grad = False
 
-        # Replace the classifier head: 1280-d → 1 (NV/MEL)
+        # Replace the classifier head: 1280-d → num_classes
+        # num_classes=1 (default) keeps the legacy binary single-logit head
+        # (sigmoid + BCEWithLogits) so existing checkpoints load unchanged.
         in_features = self.backbone.classifier[1].in_features
         dropout_rate = 0.4
         self.backbone.classifier = nn.Sequential(
             nn.Dropout(p=dropout_rate, inplace=True),
-            nn.Linear(in_features, 1),
+            nn.Linear(in_features, num_classes),
         )
 
     def forward(self, x):
         return self.backbone(x)
 
 class GrayscaleNVMELClassifier(nn.Module):
-    def __init__(self, freeze_up_to):
+    def __init__(self, freeze_up_to, num_classes=1):
         super().__init__()
 
         self.backbone = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
@@ -57,12 +59,12 @@ class GrayscaleNVMELClassifier(nn.Module):
             for param in self.backbone.features[i].parameters():
                 param.requires_grad = False
 
-        # Replace the classifier head: 1280-d → 1 (NV/MEL)
+        # Replace the classifier head: 1280-d → num_classes (1 = legacy binary logit)
         in_features = self.backbone.classifier[1].in_features
         dropout_rate = 0.4
         self.backbone.classifier = nn.Sequential(
             nn.Dropout(p=dropout_rate, inplace=True),
-            nn.Linear(in_features, 1),
+            nn.Linear(in_features, num_classes),
         )
 
     def forward(self, x):
@@ -148,6 +150,88 @@ class GrayscaleNVMELAutoencoder(nn.Module):
     def forward(self, x):
         features = self.encoder(x)
         return self.decoder(features)
+
+# %%
+# ── Model – Tiny Conv Classifier (fast multiclass iteration) ─────────────────
+#
+# Small stride-2 conv stack (5 downsamples → /32) + global average pool.
+# image_size must be divisible by 32 (e.g. 224 → 7x7 before pooling).
+# num_classes > 1 → K-logit softmax head; num_classes == 1 → single logit
+# (sigmoid + BCEWithLogits), same convention as NVMELClassifier.
+
+class ConvClassifier(nn.Module):
+    def __init__(self, num_classes, in_channels=3, base_channels=32, image_size=224, dropout=0.5):
+        super().__init__()
+        assert image_size % 32 == 0, "image_size must be divisible by 32"
+
+        channels = [base_channels * (2 ** i) for i in range(5)]  # b..16b, /32 total
+
+        layers = [
+            nn.Conv2d(in_channels, channels[0], kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(channels[0]),
+            nn.ReLU(inplace=True),
+        ]
+        for i in range(4):
+            layers += [
+                nn.Conv2d(channels[i], channels[i + 1], kernel_size=3, stride=2, padding=1, bias=False),
+                nn.BatchNorm2d(channels[i + 1]),
+                nn.ReLU(inplace=True),
+            ]
+        self.features = nn.Sequential(*layers)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.classifier = nn.Sequential(
+            nn.Dropout(p=dropout),
+            nn.Linear(channels[-1], num_classes),
+        )
+
+    def forward(self, x):
+        x = self.pool(self.features(x))
+        x = torch.flatten(x, 1)
+        return self.classifier(x)
+
+# %%
+# ── Model – Tiny Conv Autoencoder (fast multiclass iteration) ────────────────
+#
+# Mirrors ConvClassifier's encoder stack; spatial latent (B, 16b, H/32, W/32)
+# like the EfficientNet AE's (B, 1280, 7, 7). Symmetric ConvTranspose2d decoder,
+# no final activation (inputs are expected to be normalised — same convention as
+# NVMELAutoencoder).
+
+class ConvAutoencoder(nn.Module):
+    def __init__(self, in_channels=3, base_channels=32, image_size=224):
+        super().__init__()
+        assert image_size % 32 == 0, "image_size must be divisible by 32"
+
+        channels = [base_channels * (2 ** i) for i in range(5)]  # b..16b, /32 total
+
+        enc = [
+            nn.Conv2d(in_channels, channels[0], kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(channels[0]),
+            nn.ReLU(inplace=True),
+        ]
+        for i in range(4):
+            enc += [
+                nn.Conv2d(channels[i], channels[i + 1], kernel_size=3, stride=2, padding=1, bias=False),
+                nn.BatchNorm2d(channels[i + 1]),
+                nn.ReLU(inplace=True),
+            ]
+        self.encoder = nn.Sequential(*enc)
+        # encoder output: (B, 16 * base_channels, image_size/32, image_size/32)
+
+        dec = []
+        for i in range(4, 0, -1):
+            dec += [
+                nn.ConvTranspose2d(channels[i], channels[i - 1], kernel_size=4, stride=2, padding=1),
+                nn.BatchNorm2d(channels[i - 1]),
+                nn.ReLU(inplace=True),
+            ]
+        dec += [
+            nn.ConvTranspose2d(channels[0], in_channels, kernel_size=4, stride=2, padding=1),
+        ]
+        self.decoder = nn.Sequential(*dec)
+
+    def forward(self, x):
+        return self.decoder(self.encoder(x))
 
 # %%
 # ── Model – EfficientNet-B0 VAE ───────────────────────────────────────────────

@@ -260,3 +260,112 @@ class ISIC2018Dataset(Dataset):
         else:
             label = None
         return {"image": tensor, "label": label, "id": stem}
+
+
+class FolderDataset(Dataset):
+    """
+    Lazy-loading dataset for class-subfolder image layouts, e.g.::
+
+        root/
+          circle/0.png 1000.png ...
+          square/0.png 1000.png ...
+          ...
+
+    One subdirectory per class; classes are the sorted subdirectory names
+    unless ``class_names`` specifies an explicit order. Returns the same dict
+    interface as ``ISIC2018Dataset``: ``{"image", "label", "id"}`` where
+    ``label`` is a one-hot float tensor of size ``len(class_names)`` (so
+    ``argmax`` gives the class index, matching existing call sites) and
+    ``id`` is ``"<class>/<stem>"`` (unique across classes).
+
+    Parameters
+    ----------
+    root_dir : str
+        Directory whose immediate subdirectories are the class folders.
+    transform : callable, optional
+        Transform applied to each PIL image.
+    class_names : list of str, optional
+        Explicit class order. Defaults to the sorted subdirectory names.
+    load_into_memory : bool
+        If True, all images are loaded into RAM at init.
+    """
+
+    VALID_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+
+    def __init__(
+        self,
+        root_dir: str,
+        transform=None,
+        class_names: list = None,
+        load_into_memory: bool = False,
+    ):
+        self.root_dir = root_dir
+
+        found = sorted(
+            d for d in os.listdir(root_dir)
+            if os.path.isdir(os.path.join(root_dir, d))
+        )
+        if not found:
+            raise FileNotFoundError(f"No class subdirectories found in '{root_dir}'.")
+
+        if class_names is not None:
+            unknown = set(class_names) - set(found)
+            if unknown:
+                raise ValueError(
+                    f"class_names not present under '{root_dir}': {sorted(unknown)}. "
+                    f"Found: {found}"
+                )
+            self.class_names = list(class_names)
+        else:
+            self.class_names = found
+
+        self.samples = []  # (path, class_idx)
+        for cls_idx, cls in enumerate(self.class_names):
+            cls_dir = os.path.join(root_dir, cls)
+            files = sorted(
+                f for f in os.listdir(cls_dir)
+                if os.path.splitext(f)[1].lower() in self.VALID_EXTENSIONS
+            )
+            for f in files:
+                self.samples.append((os.path.join(cls_dir, f), cls_idx))
+
+        if not self.samples:
+            raise FileNotFoundError(
+                f"No {self.VALID_EXTENSIONS} files found in class subdirs of '{root_dir}'."
+            )
+
+        print(
+            f"Found {len(self.samples)} images across {len(self.class_names)} classes "
+            f"in '{root_dir}': {self.class_names}"
+        )
+
+        self.transform = transform
+
+        self.load_into_memory = load_into_memory
+        self.images = None
+        if self.load_into_memory:
+            print("Loading images into memory...")
+            self.images = [Image.open(path).convert("RGB") for path, _ in self.samples]
+            print("Done loading images into memory.")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        img_path, cls_idx = self.samples[idx]
+        if self.load_into_memory:
+            img = self.images[idx]
+        else:
+            img = Image.open(img_path).convert("RGB")
+
+        if self.transform is not None:
+            tensor = self.transform(img)
+        else:
+            tensor = img
+
+        label = torch.nn.functional.one_hot(
+            torch.tensor(cls_idx), num_classes=len(self.class_names)
+        ).float()
+        stem = os.path.splitext(os.path.basename(img_path))[0]
+        sample_id = f"{self.class_names[cls_idx]}/{stem}"
+        return {"image": tensor, "label": label, "id": sample_id}
