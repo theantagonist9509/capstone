@@ -389,7 +389,7 @@ if __name__ == "__main__":
     
     parent_dir = os.path.abspath(os.path.join(os.getcwd(), "."))
     if parent_dir not in sys.path:
-        sys.path.append(parent_dir)
+        sys.path.insert(0, parent_dir)
 
     from utils import load_best_model
     

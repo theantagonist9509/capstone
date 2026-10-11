@@ -12,13 +12,13 @@ from tqdm import tqdm
 
 parent_dir = os.path.abspath(os.path.join(os.getcwd(), "."))
 if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
+    sys.path.insert(0, parent_dir)
 
 # Also add the repo root so `traversal` / core modules resolve when this
 # script is run from playground/ (the GUI imports this module from there).
 _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _repo_root not in sys.path:
-    sys.path.append(_repo_root)
+    sys.path.insert(0, _repo_root)
 
 from datasets import ISIC2018Dataset
 from models import NVMELClassifier, NVMELAutoencoder, NVMELVAE
