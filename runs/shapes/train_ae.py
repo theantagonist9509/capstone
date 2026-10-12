@@ -4,9 +4,9 @@
 # Trains the tiny ConvAutoencoder (`models.ConvAutoencoder`) on the 4-shapes
 # dataset. No labels are used; every image is a reconstruction target.
 #
-# **Loss** — default `ms_ssim` (paper's final pipeline trained the AE with
-# MS-SSIM, matching the reconstruction-loop loss used for the traversal's
-# orthogonal constraint). Pass `--ae-loss mse` for the old criterion.
+# **Loss** — default `mse` (matches the reconstruction-loop criterion used by
+# the traversal's orthogonal constraint). Pass `--ae-loss ms_ssim` for the
+# paper's MS-SSIM variant.
 #
 # **Usage**
 # - locally: `python runs/shapes/train_ae.py [--smoke] [--ae-loss mse]`
@@ -118,8 +118,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--smoke", action="store_true",
                         help="single fwd+bwd sanity pass, no checkpointing")
-    parser.add_argument("--ae-loss", choices=["mse", "ms_ssim"], default="ms_ssim",
-                        help="reconstruction criterion (paper's final pipeline: ms_ssim)")
+    parser.add_argument("--ae-loss", choices=["mse", "ms_ssim"], default="mse",
+                        help="reconstruction criterion (default: mse)")
     args = parser.parse_args()
 
     train_loader, val_loader = build_loaders()

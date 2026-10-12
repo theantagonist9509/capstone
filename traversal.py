@@ -125,7 +125,6 @@ def take_latent_step(
     direction: float,
     optimizer: torch.optim.Optimizer,
     orthogonal: bool = False,
-    orth_lambda: float = 1.0,
     target_class: int = None,
 ):
     """
@@ -142,14 +141,6 @@ def take_latent_step(
     orthogonal=True: before applying the step, the score gradient is
     orthogonally projected relative to V = d(err)/dz, where
     err = recon_loss_fn(recon, recon'), recon' = decoder(encoder(recon)).
-
-    orth_lambda (only used when orthogonal=True) controls the projection
-    strength — PARTIAL orthogonal projection:
-        G ← G − λ · ((G·V)/‖V‖²) · V
-      λ = 1.0 : full projection (stays on the recon manifold; invisible flips)
-      λ = 0.0 : raw gradient (fast flips, possible artifacts)
-      0<λ<1   : trade-off — keeps most of the manifold constraint while
-                allowing a visible change before the boundary.
     """
     optimizer.zero_grad()
     logits = classifier_model(ae_model.decoder(z))
@@ -174,8 +165,8 @@ def take_latent_step(
 
         G_flat, V_flat = z.grad.view(-1), V.view(-1)
         V_norm_sq = (V_flat * V_flat).sum()
-        if orth_lambda != 0.0 and V_norm_sq.item() > 1e-12:
-            G_flat = G_flat - orth_lambda * (G_flat @ V_flat) / V_norm_sq * V_flat
+        if V_norm_sq.item() > 1e-12:
+            G_flat = G_flat - (G_flat @ V_flat) / V_norm_sq * V_flat
         z.grad = G_flat.view_as(z.grad)
 
     optimizer.step()
@@ -230,9 +221,9 @@ def extrapolate_image(
     optimizer_cls=torch.optim.Adam,
     optimizer_kwargs=None,
     orthogonal: bool = True,
-    orth_lambda: float = 1.0,
     target_prob: float = 0.75,
     target="auto",
+    step_sizes_out: list = None,
 ):
     """
     Traverse the latent space by optimizing the latent vector z to move the
@@ -241,13 +232,15 @@ def extrapolate_image(
     The gradient is recomputed at every step so the direction tracks the local
     manifold geometry. orthogonal=True projects each score gradient orthogonal
     to V = d(err)/dz (err = recon loop loss) to preserve reconstruction
-    fidelity; orth_lambda ∈ [0,1] sets the projection strength (1 = full
-    projection, 0 = raw gradient — see take_latent_step).
+    fidelity; orthogonal=False walks the raw score gradient ("vanilla").
 
     target="auto" (default): the second-best class w.r.t. the initial
     prediction — for 1-logit binary classifiers this is exactly the legacy
     behavior (step along the logit for NV, against it for MEL). An explicit
     class index targets that class instead.
+
+    step_sizes_out: optional list; when given, the L2 norm of each actual
+    update ‖z_{t+1} − z_t‖ is appended to it (one entry per step taken).
 
     Returns (traversal_images, traversal_probs, traversal_recon_errors,
     traversal_grad_norms, traversal_pred_idxs, target_idx) where
@@ -256,8 +249,7 @@ def extrapolate_image(
     if optimizer_kwargs is None:
         optimizer_kwargs = {"lr": 0.05}
 
-    tag = (f"[Orthogonal λ={orth_lambda:g}]" if orthogonal and orth_lambda != 1.0
-           else "[Orthogonal]" if orthogonal else "[Raw]")
+    tag = "[Orthogonal]" if orthogonal else "[Raw]"
     actual_idx = int(actual_label_onehot.argmax().item())  # works for (K,) or (1,K)
     img_tensor = img_tensor.to(device)
     print(f"\n{tag} Extrapolating image of actual class {class_names[actual_idx]}...")
@@ -309,6 +301,7 @@ def extrapolate_image(
     optimizer = optimizer_cls([current_z], **optimizer_kwargs)
 
     for i in range(1, steps + 1):
+        z_before = current_z.detach().clone()
         take_latent_step(
             current_z,
             classifier_model,
@@ -317,9 +310,10 @@ def extrapolate_image(
             direction,
             optimizer,
             orthogonal,
-            orth_lambda=orth_lambda,
             target_class=target_idx,
         )
+        if step_sizes_out is not None:
+            step_sizes_out.append((current_z.detach() - z_before).norm().item())
 
         grad_norm_step = current_z.grad.norm().item() if current_z.grad is not None else 0.0
 
@@ -354,6 +348,183 @@ def extrapolate_image(
 
     return (traversal_images, traversal_probs, traversal_recon_errors,
             traversal_grad_norms, traversal_pred_idxs, target_idx)
+
+
+# %%
+def extrapolate_pixels(
+    img_tensor,
+    actual_label_onehot,
+    classifier_model: nn.Module,
+    class_names: list,
+    device,
+    steps: int = 30,
+    optimizer_cls=torch.optim.Adam,
+    optimizer_kwargs=None,
+    target_prob: float = 0.75,
+    target="auto",
+    mean=IMAGENET_MEAN,
+    std=IMAGENET_STD,
+):
+    """
+    Image-space (FGSM-like) traversal: gradient descent directly on the
+    NORMALISED pixels of `img_tensor` (no autoencoder involved), projected
+    back onto the valid image range after every step — the same recipe as
+    `temp/pixel_attack.py` (Adam, clamp in normalised space).
+
+    Scoring/stop logic mirrors extrapolate_image: multiclass score is
+    logit_t − logit_c, stop when the prediction is the target and
+    P(target) >= target_prob (legacy binary flip logic for 1-logit models).
+
+    Returns (traversal_images, traversal_probs, None, None, traversal_pred_idxs,
+    target_idx) — recon errors / grad norms are not applicable in pixel space.
+    """
+    if optimizer_kwargs is None:
+        optimizer_kwargs = {"lr": 0.05}
+
+    tag = "[Pixels]"
+    actual_idx = int(actual_label_onehot.argmax().item())
+    x = img_tensor.to(device).detach().clone()
+    print(f"\n{tag} Extrapolating image of actual class {class_names[actual_idx]}...")
+
+    mean_t = torch.tensor(mean, device=x.device).view(3, 1, 1)
+    std_t  = torch.tensor(std,  device=x.device).view(3, 1, 1)
+    lo = (0.0 - mean_t) / std_t   # valid pixel range in normalised space
+    hi = (1.0 - mean_t) / std_t
+
+    with torch.no_grad():
+        logits_initial, probs_initial, pred_initial_idx = predict(classifier_model, x)
+    target_idx = resolve_target(logits_initial, pred_initial_idx, target)
+    is_binary_logit = probs_initial.numel() == 1
+
+    def _fmt_probs(p):
+        return "[" + ", ".join(f"{v:.2f}" for v in p.view(-1).tolist()) + "]"
+
+    print(f"{tag} Original Image Pred   : {class_names[pred_initial_idx]} "
+          f"(Correct: {pred_initial_idx == actual_idx})")
+    print(f"{tag} Initial probs         : {_fmt_probs(probs_initial)}")
+    print(f"{tag} Traversing toward     : {class_names[target_idx]}")
+
+    if is_binary_logit:
+        direction = 1.0 if target_idx == 1 else -1.0
+        print(f"{tag} Stepping {'ALONG' if direction > 0 else 'AGAINST'} the logit gradient.")
+    else:
+        direction = 1.0
+        print(f"{tag} Stepping +1 along the score gradient (logit_t − logit_c).")
+
+    traversal_images = [x.detach().cpu().squeeze(0)]
+    traversal_probs  = [probs_initial[target_idx].item()]
+    traversal_pred_idxs = [pred_initial_idx]
+
+    x.requires_grad_(True)
+    optimizer = optimizer_cls([x], **optimizer_kwargs)
+
+    for i in range(1, steps + 1):
+        optimizer.zero_grad()
+        logits = classifier_model(x)
+
+        if logits.shape[-1] == 1:
+            loss = -direction * logits.view(-1)[0]
+        else:
+            logits = logits.view(-1)
+            pred_idx = int(logits.argmax().item())
+            target_idx = resolve_target(logits, pred_idx, target_idx)
+            loss = -direction * (logits[target_idx] - logits[pred_idx])
+
+        loss.backward()
+
+        x_before = x.detach().clone()
+        optimizer.step()
+        with torch.no_grad():
+            x.clamp_(lo, hi)   # project onto the valid image range
+
+        with torch.no_grad():
+            _, probs_step, pred_step_idx = predict(classifier_model, x)
+
+        traversal_images.append(x.detach().cpu().squeeze(0))
+        traversal_probs.append(probs_step[target_idx].item())
+        traversal_pred_idxs.append(pred_step_idx)
+
+        if is_binary_logit:
+            p_target = probs_step[target_idx].item()
+            flip_threshold = target_prob if pred_initial_idx == 0 else 1.0 - target_prob
+            flipped = (pred_initial_idx == 0 and p_target >= flip_threshold) or \
+                      (pred_initial_idx == 1 and p_target <= flip_threshold)
+        else:
+            flipped = (pred_step_idx == target_idx
+                       and probs_step[target_idx].item() >= target_prob)
+
+        if flipped:
+            dx = (x.detach() - x_before).norm().item()
+            print(f"{tag} Target prob reached at step {i}! "
+                  f"p({class_names[target_idx]})={probs_step[target_idx].item():.4f}  "
+                  f"‖Δx‖={dx:.4f}")
+            break
+
+    return (traversal_images, traversal_probs, None, None,
+            traversal_pred_idxs, target_idx)
+
+
+# %%
+def plot_traversal_rows(
+    rows,
+    title="",
+    class_names=None,
+    mean=IMAGENET_MEAN,
+    std=IMAGENET_STD,
+    save_path=None,
+    show=True,
+):
+    """
+    One strip per row — side-by-side comparison of traversal methods
+    (e.g. image space vs vanilla latent vs orthogonal latent) on the same
+    image toward the same target.
+
+    rows: [{"label": str,           row name shown on the left
+            "images": [C,H,W],      frame tensors
+            "probs": [float],       P(target) per frame
+            "pred_idxs": [int] | None,
+            "start": "original" | "recon"}, ...]   what frame 0 is
+
+    Frame titles state the predicted class AND that the number is P(target),
+    so the two can't be confused.
+    """
+    n_rows = len(rows)
+    n_cols = max(len(r["images"]) for r in rows)
+    mean_t = torch.tensor(mean).view(3, 1, 1)
+    std_t  = torch.tensor(std).view(3, 1, 1)
+
+    fig, axes = plt.subplots(n_rows, n_cols,
+                             figsize=(2.3 * n_cols, 2.5 * n_rows),
+                             squeeze=False)
+
+    for ri, row in enumerate(rows):
+        first_head = "Original" if row.get("start") == "original" else "Recon"
+        for ci in range(n_cols):
+            ax = axes[ri][ci]
+            if ci >= len(row["images"]):
+                ax.axis("off")
+                continue
+            img = row["images"][ci]
+            rgb = (img * std_t + mean_t).clamp(0, 1).permute(1, 2, 0).cpu().numpy()
+            ax.imshow(rgb)
+            head = first_head if ci == 0 else f"Step {ci}"
+            p_t = row["probs"][ci]
+            if row.get("pred_idxs") is not None and class_names is not None:
+                line2 = f"{class_names[row['pred_idxs'][ci]]}\np_t={p_t:.2f}"
+            else:
+                line2 = f"p_t={p_t:.2f}"
+            ax.set_title(f"{head}\n{line2}", fontsize=7)
+            ax.axis("off")
+            if ci == 0:
+                ax.set_ylabel(row["label"], fontsize=9)
+
+    fig.suptitle(title, fontsize=13)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    if save_path is not None:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        plt.savefig(save_path, bbox_inches="tight", dpi=150)
+        print(f"Saved plot: {save_path}")
+    maybe_show(fig)
 
 
 # %%
@@ -427,14 +598,14 @@ def plot_traversal(
         else:
             pred_label = "MEL" if prob > 0.5 else "NV"
         step_title = "Original\n(recon)" if i == 0 else f"Step {i}"
-        ax.set_title(f"{step_title}\n{pred_label} ({prob:.2f})\nerr={err:.3f}  |G|={gnorm:.2f}", fontsize=8)
+        ax.set_title(f"{step_title}\n{pred_label} (p_t={prob:.2f})\nerr={err:.3f}  |G|={gnorm:.2f}", fontsize=8)
         ax.axis("off")
 
     bot_gs = outer_gs[1].subgridspec(1, n_top, wspace=0.08)
 
     ax_orig = fig.add_subplot(bot_gs[0, 0])
     ax_orig.imshow(orig_rgb)
-    ax_orig.set_title("Original image\n(step 0)", fontsize=9)
+    ax_orig.set_title("Reconstruction\n(step 0)", fontsize=9)
     ax_orig.axis("off")
 
     ax_final = fig.add_subplot(bot_gs[0, 1])
@@ -454,7 +625,7 @@ def plot_traversal(
     ax_overlay.axis("off")
 
     fig.suptitle(title, fontsize=14)
-    plt.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.95))  # reserve room so suptitle can't overlap frame titles
     if save_path is not None:
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
         plt.savefig(save_path, bbox_inches="tight", dpi=150)

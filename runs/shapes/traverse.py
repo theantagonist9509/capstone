@@ -1,17 +1,21 @@
 # %% [markdown]
 # # Shapes (4-class) — Latent space traversal demo
 #
-# Loads the best shapes ConvClassifier + ConvAutoencoder checkpoints and runs
-# multiclass latent traversal (`traversal.py`):
-# - untargeted gradient traversal (target = second-best class, the default),
-#   swept over a list of partial-orthogonal λ values (1 = full projection /
-#   invisible flips, 0 = raw gradient / possible artifacts)
-# - one explicitly targeted traversal (same λ sweep)
-# - a short PCA-axis walk (sideways, iso-confidence directions)
+# Loads the best shapes ConvClassifier + ConvAutoencoder checkpoints and, for
+# each correctly-classified validation image, runs **three traversals toward
+# the same target class** and shows them stacked in one figure:
+# - **image space (FGSM-like)** — gradient directly on the pixels, clamped to
+#   the valid image range (no autoencoder involved),
+# - **latent — vanilla** — raw score gradient through the decoder,
+# - **latent — orthogonal** — score gradient projected ⊥ V (recon-loop
+#   manifold constraint), the paper's full-orthogonal baseline.
+#
+# Plus one explicitly targeted traversal, a short PCA-axis walk, and — pooled
+# over all traversed images — distributions of the per-step latent update
+# sizes ‖Δz‖ for vanilla vs orthogonal (does the constraint shrink steps?).
 #
 # **Usage**
-# - locally: `python runs/shapes/traverse.py [--smoke]
-#            [--orth-lambdas 1.0,0.5,0.0]`
+# - locally: `python runs/shapes/traverse.py [--smoke]`
 # - Kaggle:  `python kaggle.py runs/shapes/traverse.py` then
 #   upload/push to the `btp-26` kernel (see `kaggle.md`)
 #
@@ -25,6 +29,7 @@ import sys
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn as nn
 from torchvision import transforms
 
 _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -32,12 +37,14 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from custom_datasets import FolderDataset
-from losses import MS_SSIMLoss
 from models import ConvAutoencoder, ConvClassifier
 from traversal import (
     extrapolate_image,
+    extrapolate_pixels,
     plot_traversal,
+    plot_traversal_rows,
     predict,
+    resolve_target,
     take_latent_step,
     take_pca_step,
 )
@@ -84,14 +91,6 @@ def build_val_split():
         base, [n_train, n_val], generator=torch.Generator().manual_seed(SEED)
     )
     return base.class_names, val_sub
-
-
-def recon_loop_loss(device):
-    return MS_SSIMLoss(
-        channels=3,
-        denorm_mean=torch.tensor([MEAN, MEAN, MEAN]),
-        denorm_std=torch.tensor([STD, STD, STD]),
-    ).to(device)
 
 
 def save_image_grid(images, path, title=""):
@@ -152,17 +151,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--smoke", action="store_true",
                         help="1 image, 2 steps, random-init models, no checkpoints")
-    parser.add_argument("--orth-lambdas", default="1.0,0.5,0.0",
-                        help="comma-separated partial-orthogonal strengths for the "
-                             "gradient traversals: 1.0 = full projection (paper "
-                             "baseline), 0.0 = raw gradient. Use '1.0' alone to "
-                             "reproduce the old single-λ behaviour.")
     args = parser.parse_args()
-
-    orth_lambdas = [float(s) for s in args.orth_lambdas.split(",") if s.strip()]
-    if not orth_lambdas:
-        parser.error("--orth-lambdas must contain at least one value")
-    print(f"Orthogonal λ sweep: {orth_lambdas}")
 
     class_names, val_sub = build_val_split()
     print(f"Val split size: {len(val_sub)} | classes: {class_names}")
@@ -174,7 +163,9 @@ def main():
         base_channels=BASE_CHANNELS, image_size=IMAGE_SIZE
     ).to(DEVICE)
 
-    rloss = recon_loop_loss(DEVICE)
+    # Reconstruction-loop criterion — must match how the AE was trained
+    # (default mse; see runs/shapes/train_ae.py).
+    rloss = nn.MSELoss()
 
     if args.smoke:
         item = val_sub[0]
@@ -182,10 +173,16 @@ def main():
         results = extrapolate_image(
             img, lbl, classifier_model, ae_model, rloss,
             class_names=class_names, device=DEVICE,
-            steps=2, orthogonal=True, orth_lambda=0.5, target="auto",
+            steps=2, orthogonal=True, target="auto",
         )
         imgs, probs, errs, gnorms, pred_idxs, target_idx = results
         assert len(imgs) == 3  # initial + 2 steps
+        # image-space (FGSM-like) smoke
+        p_imgs, p_probs, _, _, p_preds, p_tgt = extrapolate_pixels(
+            img, lbl, classifier_model, class_names=class_names, device=DEVICE,
+            steps=2, target="auto", mean=[MEAN] * 3, std=[STD] * 3,
+        )
+        assert len(p_imgs) == 3 and p_tgt is not None
         z = ae_model.encoder(img.to(DEVICE))
         with torch.no_grad():
             _, _, pred0 = predict(classifier_model, ae_model.decoder(z))
@@ -204,7 +201,9 @@ def main():
         z_pca = take_pca_step(z_pca, classifier_model, ae_model, all_emb, 0, 1.0, 0.1)
         print(f"[SMOKE] traversal ok | target={class_names[target_idx]} "
               f"pred0={class_names[pred0]} p_target={[round(p, 3) for p in probs]} "
-              f"recon_err={errs[0]:.4f} |G|={gnorms[0]:.4f} | pca step ok")
+              f"recon_err={errs[0]:.4f} |G|={gnorms[0]:.4f} | pca step ok | "
+              f"pixel ok (target={class_names[p_tgt]}, "
+              f"p_target={[round(p, 3) for p in p_probs]})")
         return
 
     # ── Load best checkpoints ─────────────────────────────────────────────────
@@ -231,55 +230,76 @@ def main():
     for p in classifier_model.parameters():
         p.requires_grad = True
 
-    # ── Untargeted (second-best) gradient traversal per class ─────────────────
-    # Only correctly-classified images are traversed (and thus shown).
+    # ── Per-image comparison: image space vs vanilla vs orthogonal ────────────
+    # Only correctly-classified images are traversed (and thus shown). The
+    # target class is resolved ONCE per image (second-best w.r.t. the
+    # original) so all three methods head toward the same boundary.
     chosen = select_images(val_sub, class_names, N_PER_CLASS, classifier_model, DEVICE)
+    vanilla_step_sizes, orth_step_sizes = [], []
     for lbl_idx, label_name in enumerate(class_names):
         if not chosen[lbl_idx]:
             print(f"Skipping class '{label_name}' — no correctly-classified images.")
             continue
         for k, (img, lbl) in enumerate(chosen[lbl_idx]):
-            for lam in orth_lambdas:
-                results = extrapolate_image(
-                    img.unsqueeze(0), lbl, classifier_model, ae_model, rloss,
-                    class_names=class_names, device=DEVICE,
-                    steps=STEPS, orthogonal=True, orth_lambda=lam,
-                    target_prob=TARGET_PROB, target="auto",
-                )
-                imgs, probs, errs, gnorms, pred_idxs, target_idx = results
-                plot_traversal(
-                    imgs, probs, errs, gnorms,
-                    pred_idxs=pred_idxs, class_names=class_names,
-                    title=f"Shapes traversal {label_name} #{k+1} → "
-                          f"{class_names[target_idx]} (orth λ={lam:g})",
-                    mean=[MEAN] * 3, std=[STD] * 3,
-                    save_path=os.path.join(
-                        OUT_DIR, f"traverse_{label_name}_{k+1}_lam{lam:g}.png"
-                    ),
-                )
+            with torch.no_grad():
+                logits0, probs0, pred0 = predict(classifier_model, img.unsqueeze(0).to(DEVICE))
+            tgt = resolve_target(logits0, pred0, "auto")
+
+            r_pix = extrapolate_pixels(
+                img.unsqueeze(0), lbl, classifier_model,
+                class_names=class_names, device=DEVICE,
+                steps=STEPS, target_prob=TARGET_PROB, target=tgt,
+                mean=[MEAN] * 3, std=[STD] * 3,
+            )
+            sv, so = [], []
+            r_van = extrapolate_image(
+                img.unsqueeze(0), lbl, classifier_model, ae_model, rloss,
+                class_names=class_names, device=DEVICE,
+                steps=STEPS, orthogonal=False, target_prob=TARGET_PROB, target=tgt,
+                step_sizes_out=sv,
+            )
+            r_orth = extrapolate_image(
+                img.unsqueeze(0), lbl, classifier_model, ae_model, rloss,
+                class_names=class_names, device=DEVICE,
+                steps=STEPS, orthogonal=True, target_prob=TARGET_PROB, target=tgt,
+                step_sizes_out=so,
+            )
+            vanilla_step_sizes += sv
+            orth_step_sizes += so
+
+            plot_traversal_rows(
+                [
+                    {"label": "image space\n(FGSM-like)", "start": "original",
+                     "images": r_pix[0], "probs": r_pix[1], "pred_idxs": r_pix[4]},
+                    {"label": "latent — vanilla", "start": "recon",
+                     "images": r_van[0], "probs": r_van[1], "pred_idxs": r_van[4]},
+                    {"label": "latent — orthogonal", "start": "recon",
+                     "images": r_orth[0], "probs": r_orth[1], "pred_idxs": r_orth[4]},
+                ],
+                title=f"Shapes {label_name} #{k+1} → {class_names[tgt]}",
+                class_names=class_names,
+                mean=[MEAN] * 3, std=[STD] * 3,
+                save_path=os.path.join(OUT_DIR, f"traverse_{label_name}_{k+1}.png"),
+            )
 
     # ── One explicitly targeted traversal (first correct image → class 0) ─────
     first_available = next((i for i in range(len(class_names)) if chosen[i]), None)
     if first_available is None:
         raise SystemExit("No correctly-classified images available to traverse.")
     img0, lbl0 = chosen[first_available][0]
-    for lam in orth_lambdas:
-        results = extrapolate_image(
-            img0.unsqueeze(0), lbl0, classifier_model, ae_model, rloss,
-            class_names=class_names, device=DEVICE,
-            steps=STEPS, orthogonal=True, orth_lambda=lam,
-            target_prob=TARGET_PROB, target=0,
-        )
-        imgs, probs, errs, gnorms, pred_idxs, target_idx = results
-        plot_traversal(
-            imgs, probs, errs, gnorms,
-            pred_idxs=pred_idxs, class_names=class_names,
-            title=f"Shapes targeted traversal → {class_names[0]} (orth λ={lam:g})",
-            mean=[MEAN] * 3, std=[STD] * 3,
-            save_path=os.path.join(
-                OUT_DIR, f"traverse_targeted_{class_names[0]}_lam{lam:g}.png"
-            ),
-        )
+    results = extrapolate_image(
+        img0.unsqueeze(0), lbl0, classifier_model, ae_model, rloss,
+        class_names=class_names, device=DEVICE,
+        steps=STEPS, orthogonal=True, target_prob=TARGET_PROB, target=0,
+    )
+    imgs, probs, errs, gnorms, pred_idxs, target_idx = results
+    plot_traversal(
+        imgs, probs, errs, gnorms,
+        pred_idxs=pred_idxs, class_names=class_names,
+        title=f"Shapes targeted traversal → {class_names[0]}",
+        mean=[MEAN] * 3, std=[STD] * 3,
+        save_path=os.path.join(OUT_DIR, f"traverse_targeted_{class_names[0]}.png"),
+    )
 
     # ── PCA-axis walk (sideways at ~constant confidence) ──────────────────────
     with torch.no_grad():
@@ -304,6 +324,36 @@ def main():
         title=f"PCA base 0 walk from a {class_names[pred0]} "
               f"(p={probs0[pred0].item():.2f})",
     )
+
+    # ── Step-size distributions: does the orthogonal constraint shrink the
+    #    per-step latent updates? Pooled over every traversed image above.
+    if vanilla_step_sizes and orth_step_sizes:
+        bins = np.histogram_bin_edges(vanilla_step_sizes + orth_step_sizes, bins=30)
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
+        for ax, (name, sizes) in zip(
+            axes,
+            [("vanilla", vanilla_step_sizes), ("orthogonal", orth_step_sizes)],
+        ):
+            arr = np.asarray(sizes, dtype=float)
+            ax.hist(arr, bins=bins, density=True, alpha=0.75)
+            ax.axvline(arr.mean(), linestyle="--", linewidth=1.2,
+                       label=f"mean {arr.mean():.4f}")
+            ax.set_title(f"{name} — n={arr.size} steps")
+            ax.set_xlabel("‖Δz‖ per step")
+            ax.grid(alpha=0.3)
+            ax.legend(fontsize=8)
+            print(f"[steps] {name:11s} n={arr.size}  mean={arr.mean():.4f}  "
+                  f"median={np.median(arr):.4f}  std={arr.std():.4f}  "
+                  f"min={arr.min():.4f}  max={arr.max():.4f}")
+        axes[0].set_ylabel("density")
+        fig.suptitle("Latent step sizes — vanilla vs orthogonal")
+        fig.tight_layout(rect=(0, 0, 1, 0.95))
+        dist_path = os.path.join(OUT_DIR, "step_size_distributions.png")
+        plt.savefig(dist_path, bbox_inches="tight", dpi=150)
+        print(f"Saved plot: {dist_path}")
+        maybe_show(fig)
+    else:
+        print("[steps] no step sizes collected — skipping distribution plot")
 
     print("\nTraversal demo complete. Plots in:", OUT_DIR)
 
