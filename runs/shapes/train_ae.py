@@ -40,26 +40,36 @@ CHECKPOINT_DIR   = os.path.join(_repo_root, "checkpoints", "shapes", "conv_ae")
 
 IMAGE_SIZE       = 224
 BASE_CHANNELS    = 32
-BATCH_SIZE       = 64
-NUM_WORKERS      = 2
+BATCH_SIZE_PER_GPU = 64
+NUM_WORKERS      = min(4, (os.cpu_count() or 2) - 1)
 LEARNING_RATE    = 1e-3
 NUM_EPOCHS       = 10
 VAL_SPLIT        = 0.2
 SEED             = 42
 DEVICE           = "cuda" if torch.cuda.is_available() else "cpu"
+NUM_GPUS         = torch.cuda.device_count()
+BATCH_SIZE       = BATCH_SIZE_PER_GPU * max(1, NUM_GPUS)
 
 MEAN = 0.5
 STD  = 0.5
 
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
-print(f"Using device  : {DEVICE}")
+print(f"Using device  : {DEVICE} | {NUM_GPUS} GPU(s) | "
+      f"batch {BATCH_SIZE} | workers {NUM_WORKERS}")
 print(f"Checkpoint dir: {CHECKPOINT_DIR}")
 
 # %% [markdown]
 # ## Data
 
 # %%
+LOADER_KWARGS = dict(
+    num_workers=NUM_WORKERS,
+    pin_memory=DEVICE == "cuda",
+    **({"persistent_workers": True, "prefetch_factor": 4}
+       if NUM_WORKERS > 0 else {}),
+)
+
 transform = transforms.Compose([
     transforms.Resize(IMAGE_SIZE),
     transforms.ToTensor(),
@@ -76,12 +86,10 @@ def build_loaders():
         base, [n_train, n_val], generator=torch.Generator().manual_seed(SEED)
     )
     train_loader = DataLoader(
-        train_sub, batch_size=BATCH_SIZE, shuffle=True,
-        num_workers=NUM_WORKERS, pin_memory=DEVICE == "cuda",
+        train_sub, batch_size=BATCH_SIZE, shuffle=True, **LOADER_KWARGS,
     )
     val_loader = DataLoader(
-        val_sub, batch_size=BATCH_SIZE, shuffle=False,
-        num_workers=NUM_WORKERS, pin_memory=DEVICE == "cuda",
+        val_sub, batch_size=BATCH_SIZE, shuffle=False, **LOADER_KWARGS,
     )
     return train_loader, val_loader
 
@@ -116,6 +124,10 @@ def main():
         base_channels=BASE_CHANNELS,
         image_size=IMAGE_SIZE,
     ).to(DEVICE)
+    if NUM_GPUS > 1:
+        model = nn.DataParallel(model)
+    # Checkpoints always store the unwrapped weights (same layout on 1–2 GPUs).
+    model_core = model.module if isinstance(model, nn.DataParallel) else model
 
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
@@ -128,10 +140,10 @@ def main():
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        z = model.encoder(imgs)
+        z = model_core.encoder(imgs)
         print(f"[SMOKE] images {tuple(imgs.shape)} → recon {tuple(recons.shape)} "
               f"→ latent {tuple(z.shape)} → loss {loss.item():.4f} | grads ok")
-        return None
+        return None, model
 
     # ── Resume ────────────────────────────────────────────────────────────────
     start_epoch = 1
@@ -141,7 +153,7 @@ def main():
         ckpt = torch.load(existing[-1], map_location=DEVICE, weights_only=False)
         start_epoch = ckpt["epoch"] + 1
         history     = ckpt["history"]
-        model.load_state_dict(ckpt["model_state"])
+        model_core.load_state_dict(ckpt["model_state"])
         optimizer.load_state_dict(ckpt["optim_state"])
         print(f"Resumed from '{existing[-1]}' (epoch {ckpt['epoch']})")
 
@@ -177,16 +189,16 @@ def main():
         torch.save({
             "epoch"       : epoch,
             "history"     : dict(history),
-            "model_state" : model.state_dict(),
+            "model_state" : model_core.state_dict(),
             "optim_state" : optimizer.state_dict(),
         }, os.path.join(CHECKPOINT_DIR, f"epoch_{epoch:03d}.pth"))
 
     print("\nTraining complete.")
-    return dict(history)
+    return dict(history), model
 
 
 if __name__ == "__main__":
-    history = main()
+    history, model = main()
 
 # %% [markdown]
 # ## Training curves & reconstruction samples

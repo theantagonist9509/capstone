@@ -19,8 +19,12 @@ annotated .py  ──tools/py2nb.py──▶  .ipynb  ──kaggle kernels push�
 - The `muplus2sigma/capstone` kernel on kaggle.com has:
   - **GPU** enabled,
   - **Internet** enabled (the bootstrap shallow-clones this repo at run time),
-  - the **`custom-isic2018` dataset** attached (`dataset_sources`),
-  - a **package-manager attachment** providing `pytorch-msssim`.
+- the **`custom-isic2018` dataset** attached (`dataset_sources`),
+- a **package-manager attachment** providing `pytorch-msssim`,
+- **2× T4 GPUs** — the run scripts auto-wrap the model in `nn.DataParallel`
+  and scale `BATCH_SIZE` by `torch.cuda.device_count()`; checkpoints are
+  always saved with unwrapped (no `module.` prefix) weights, so single- and
+  multi-GPU checkpoints are interchangeable.
 
 **Do not `pip install` anything from within the scripts/notebooks** — the
 kernel's package-manager attachment already provides every dependency the

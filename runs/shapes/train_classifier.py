@@ -49,27 +49,37 @@ CHECKPOINT_DIR   = os.path.join(_repo_root, "checkpoints", "shapes", "conv_class
 IMAGE_SIZE       = 224
 BASE_CHANNELS    = 32
 DROPOUT          = 0.3
-BATCH_SIZE       = 64
-NUM_WORKERS      = 2
+BATCH_SIZE_PER_GPU = 64
+NUM_WORKERS      = min(4, (os.cpu_count() or 2) - 1)
 LEARNING_RATE    = 1e-3
 NUM_EPOCHS       = 10
 LABEL_SMOOTHING  = 0.1
 VAL_SPLIT        = 0.2
 SEED             = 42
 DEVICE           = "cuda" if torch.cuda.is_available() else "cpu"
+NUM_GPUS         = torch.cuda.device_count()
+BATCH_SIZE       = BATCH_SIZE_PER_GPU * max(1, NUM_GPUS)
 
 MEAN = 0.5
 STD  = 0.5
 
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
-print(f"Using device  : {DEVICE}")
+print(f"Using device  : {DEVICE} | {NUM_GPUS} GPU(s) | "
+      f"batch {BATCH_SIZE} | workers {NUM_WORKERS}")
 print(f"Checkpoint dir: {CHECKPOINT_DIR}")
 
 # %% [markdown]
 # ## Data
 
 # %%
+LOADER_KWARGS = dict(
+    num_workers=NUM_WORKERS,
+    pin_memory=DEVICE == "cuda",
+    **({"persistent_workers": True, "prefetch_factor": 4}
+       if NUM_WORKERS > 0 else {}),
+)
+
 train_transform = transforms.Compose([
     transforms.Resize(IMAGE_SIZE),
     transforms.RandomHorizontalFlip(),
@@ -112,12 +122,10 @@ def build_loaders():
     )
 
     train_loader = DataLoader(
-        train_ds, batch_size=BATCH_SIZE, sampler=sampler,
-        num_workers=NUM_WORKERS, pin_memory=DEVICE == "cuda",
+        train_ds, batch_size=BATCH_SIZE, sampler=sampler, **LOADER_KWARGS,
     )
     val_loader = DataLoader(
-        val_ds, batch_size=BATCH_SIZE, shuffle=False,
-        num_workers=NUM_WORKERS, pin_memory=DEVICE == "cuda",
+        val_ds, batch_size=BATCH_SIZE, shuffle=False, **LOADER_KWARGS,
     )
     return base.class_names, train_loader, val_loader
 
@@ -173,6 +181,10 @@ def main():
         image_size=IMAGE_SIZE,
         dropout=DROPOUT,
     ).to(DEVICE)
+    if NUM_GPUS > 1:
+        model = nn.DataParallel(model)
+    # Checkpoints always store the unwrapped weights (same layout on 1–2 GPUs).
+    model_core = model.module if isinstance(model, nn.DataParallel) else model
 
     criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
     optimizer = torch.optim.Adam(
@@ -203,7 +215,7 @@ def main():
         ckpt = torch.load(existing[-1], map_location=DEVICE, weights_only=False)
         start_epoch = ckpt["epoch"] + 1
         history     = ckpt["history"]
-        model.load_state_dict(ckpt["model_state"])
+        model_core.load_state_dict(ckpt["model_state"])
         optimizer.load_state_dict(ckpt["optim_state"])
         scheduler.load_state_dict(ckpt["sched_state"])
         print(f"Resumed from '{existing[-1]}' (epoch {ckpt['epoch']})")
@@ -253,7 +265,7 @@ def main():
         torch.save({
             "epoch"       : epoch,
             "history"     : dict(history),
-            "model_state" : model.state_dict(),
+            "model_state" : model_core.state_dict(),
             "optim_state" : optimizer.state_dict(),
             "sched_state" : scheduler.state_dict(),
         }, os.path.join(CHECKPOINT_DIR, f"epoch_{epoch:03d}.pth"))
