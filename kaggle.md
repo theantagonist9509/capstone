@@ -52,7 +52,16 @@ IPython/Jupyter and closed silently under a local Agg run.
 python tools/py2nb.py runs/shapes/train_classifier.py            # full run
 python tools/py2nb.py runs/shapes/train_classifier.py --smoke    # smoke test
 python tools/py2nb.py runs/shapes/traverse.py -o /tmp/x.ipynb    # custom output
+python tools/py2nb.py runs/shapes/train_classifier.py --smoke --push        # upload + run
+python tools/py2nb.py runs/shapes/train_classifier.py --smoke --push-only  # upload, no run
 ```
+
+`--push` / `--push-only` target `muplus2sigma/capstone` by default
+(`--kernel owner/slug` to override). `--push-only` uses Kaggle's
+quick-save API (`KernelExecutionType.QUICK_SAVE`), which updates the kernel
+without starting a session; `--push` starts a run like `kaggle kernels push`.
+Both set GPU, internet, the `custom-isic2018` dataset attachment, and a
+title that matches the kernel slug.
 
 The generated `.ipynb` (default: alongside the `.py`) contains:
 
@@ -182,7 +191,10 @@ traversal notebook.
 - `__file__` inside a kernel points at `/kaggle/src/script.py` (script
   kernels) or is meaningless (notebooks) — the bootstrap re-points it into
   the clone.
-- Repo modules must be imported *after* the bootstrap puts the clone on
-  `sys.path`; HF's `datasets` package otherwise shadows our `datasets.py`.
+- The run scripts load our `datasets.py` **by path** via
+  `importlib` (as `capstone_datasets`) because HF's installed `datasets`
+  package shadows the repo module regardless of `sys.path` ordering (and
+  may already sit in `sys.modules`). Don't "fix" this with a plain
+  `from datasets import ...`.
 - stdout is block-buffered in non-TTY runs; the bootstrap's
   `reconfigure(line_buffering=True)` keeps prints from being lost on hangs.

@@ -36,7 +36,14 @@ _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
-from datasets import FolderDataset, TransformDataset
+# HF's `datasets` package can shadow our repo module — load ours by path.
+import importlib.util as _ilu
+
+_spec = _ilu.spec_from_file_location("capstone_datasets", os.path.join(_repo_root, "datasets.py"))
+_cap_ds = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_cap_ds)
+FolderDataset = _cap_ds.FolderDataset
+TransformDataset = _cap_ds.TransformDataset
 from utils import maybe_show
 
 # %% [markdown]
