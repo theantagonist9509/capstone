@@ -192,10 +192,13 @@ class ConvClassifier(nn.Module):
 # %%
 # ── Model – Tiny Conv Autoencoder (fast multiclass iteration) ────────────────
 #
-# Mirrors ConvClassifier's encoder stack; spatial latent (B, 16b, H/32, W/32)
-# like the EfficientNet AE's (B, 1280, 7, 7). Symmetric ConvTranspose2d decoder,
-# no final activation (inputs are expected to be normalised — same convention as
-# NVMELAutoencoder).
+# Mirrors ConvClassifier's encoder stack (5 stride-2 stages → H/32) plus one
+# extra stride-2 bottleneck stage, giving a compact spatial latent of
+# (B, 16b, 4, 4) for 224×224 inputs (16 spatial locations instead of 49).
+# The decoder first bilinearly upsamples the latent back to the H/32 grid
+# (4 → 7) and then runs the symmetric ConvTranspose2d stack up to 224.
+# No final activation — inputs are expected to be normalised, same
+# convention as NVMELAutoencoder.
 
 class ConvAutoencoder(nn.Module):
     def __init__(self, in_channels=3, base_channels=32, image_size=224):
@@ -203,6 +206,8 @@ class ConvAutoencoder(nn.Module):
         assert image_size % 32 == 0, "image_size must be divisible by 32"
 
         channels = [base_channels * (2 ** i) for i in range(5)]  # b..16b, /32 total
+        grid_hw = image_size // 32          # 224 → 7 (decoder grid)
+        latent_hw = (grid_hw - 1) // 2 + 1  # extra k3/s2/p1 stage: 7 → 4
 
         enc = [
             nn.Conv2d(in_channels, channels[0], kernel_size=3, stride=2, padding=1, bias=False),
@@ -215,10 +220,17 @@ class ConvAutoencoder(nn.Module):
                 nn.BatchNorm2d(channels[i + 1]),
                 nn.ReLU(inplace=True),
             ]
+        enc += [
+            nn.Conv2d(channels[4], channels[4], kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(channels[4]),
+            nn.ReLU(inplace=True),
+        ]
         self.encoder = nn.Sequential(*enc)
-        # encoder output: (B, 16 * base_channels, image_size/32, image_size/32)
+        # encoder output: (B, 16 * base_channels, latent_hw, latent_hw) → 4×4
 
-        dec = []
+        dec = [
+            nn.Upsample(size=(grid_hw, grid_hw), mode="bilinear", align_corners=False),
+        ]
         for i in range(4, 0, -1):
             dec += [
                 nn.ConvTranspose2d(channels[i], channels[i - 1], kernel_size=4, stride=2, padding=1),

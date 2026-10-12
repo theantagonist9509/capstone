@@ -151,11 +151,22 @@ def main():
     existing    = sorted(glob.glob(os.path.join(CHECKPOINT_DIR, "epoch_*.pth")))
     if existing:
         ckpt = torch.load(existing[-1], map_location=DEVICE, weights_only=False)
-        start_epoch = ckpt["epoch"] + 1
-        history     = ckpt["history"]
-        model_core.load_state_dict(ckpt["model_state"])
-        optimizer.load_state_dict(ckpt["optim_state"])
-        print(f"Resumed from '{existing[-1]}' (epoch {ckpt['epoch']})")
+        try:
+            model_core.load_state_dict(ckpt["model_state"])
+        except RuntimeError:
+            # e.g. latent-size change: quarantine unusable old-arch checkpoints
+            # so this run (and later traverse.py) don't trip over them.
+            stale_dir = os.path.join(CHECKPOINT_DIR, "stale_old_arch")
+            os.makedirs(stale_dir, exist_ok=True)
+            for f in existing:
+                os.replace(f, os.path.join(stale_dir, os.path.basename(f)))
+            print(f"Architecture changed — moved {len(existing)} old checkpoint(s) "
+                  f"to {stale_dir}; starting fresh.")
+        else:
+            start_epoch = ckpt["epoch"] + 1
+            history     = ckpt["history"]
+            optimizer.load_state_dict(ckpt["optim_state"])
+            print(f"Resumed from '{existing[-1]}' (epoch {ckpt['epoch']})")
 
     # ── Train ─────────────────────────────────────────────────────────────────
     for epoch in range(start_epoch, NUM_EPOCHS + 1):

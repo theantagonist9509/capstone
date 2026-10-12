@@ -110,15 +110,35 @@ def save_image_grid(images, path, title=""):
     maybe_show(fig)
 
 
-def select_images(val_sub, class_names, n_per_class):
+def select_images(val_sub, class_names, n_per_class, classifier_model=None, device="cpu"):
+    """Pick up to n_per_class val images per class that the classifier
+    classifies CORRECTLY (prediction on the original image == true label).
+    Misclassified images are skipped entirely — we only traverse/show images
+    the classifier got right."""
     chosen = {i: [] for i in range(len(class_names))}
+    scanned, rejected = 0, 0
     for idx in range(len(val_sub)):
         item = val_sub[idx]
         lbl_idx = item["label"].argmax().item()
+        scanned += 1
+        if classifier_model is not None:
+            with torch.no_grad():
+                _, _, pred_idx = predict(
+                    classifier_model, item["image"].unsqueeze(0).to(device)
+                )
+            if pred_idx != lbl_idx:
+                rejected += 1
+                continue
         if len(chosen[lbl_idx]) < n_per_class:
             chosen[lbl_idx].append((item["image"], item["label"]))
         if all(len(v) == n_per_class for v in chosen.values()):
             break
+    n_sel = sum(len(v) for v in chosen.values())
+    print(f"Selected {n_sel} correctly-classified images ({n_per_class}/class) "
+          f"| scanned {scanned}, misclassified skipped {rejected}")
+    for i, name in enumerate(class_names):
+        if not chosen[i]:
+            print(f"WARNING: no correctly-classified '{name}' images in the val split")
     return chosen
 
 # %% [markdown]
@@ -199,8 +219,12 @@ def main():
         p.requires_grad = True
 
     # ── Untargeted (second-best) gradient traversal per class ─────────────────
-    chosen = select_images(val_sub, class_names, N_PER_CLASS)
+    # Only correctly-classified images are traversed (and thus shown).
+    chosen = select_images(val_sub, class_names, N_PER_CLASS, classifier_model, DEVICE)
     for lbl_idx, label_name in enumerate(class_names):
+        if not chosen[lbl_idx]:
+            print(f"Skipping class '{label_name}' — no correctly-classified images.")
+            continue
         for k, (img, lbl) in enumerate(chosen[lbl_idx]):
             results = extrapolate_image(
                 img.unsqueeze(0), lbl, classifier_model, ae_model, rloss,
@@ -216,8 +240,11 @@ def main():
                 save_path=os.path.join(OUT_DIR, f"traverse_{label_name}_{k+1}.png"),
             )
 
-    # ── One explicitly targeted traversal (first image → class 0) ─────────────
-    img0, lbl0 = chosen[0][0]
+    # ── One explicitly targeted traversal (first correct image → class 0) ─────
+    first_available = next((i for i in range(len(class_names)) if chosen[i]), None)
+    if first_available is None:
+        raise SystemExit("No correctly-classified images available to traverse.")
+    img0, lbl0 = chosen[first_available][0]
     results = extrapolate_image(
         img0.unsqueeze(0), lbl0, classifier_model, ae_model, rloss,
         class_names=class_names, device=DEVICE,
