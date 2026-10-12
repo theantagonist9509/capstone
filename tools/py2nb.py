@@ -98,8 +98,8 @@ if not os.path.isdir(os.path.join(ROOT, ".git")):
 print("[bootstrap] cloned commit:", subprocess.check_output(
     ["git", "-C", ROOT, "rev-parse", "--short", "HEAD"], text=True).strip())
 
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pytorch-msssim"], check=True)
-print("[bootstrap] pytorch-msssim ok")
+# Dependencies (e.g. pytorch-msssim) come from the kernel's package-manager
+# attachment — no pip installs here. See kaggle.md.
 
 # Locate the attached dataset by its class folders (mount layout varies).
 _ds_src = None
