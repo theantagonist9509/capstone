@@ -21,8 +21,9 @@ annotated .py  ──kaggle.py (jupytext)──▶  .ipynb  ──push──▶ 
 - The `muplus2sigma/btp-26` kernel on kaggle.com has:
   - **GPU** enabled,
   - **Internet** enabled (the bootstrap shallow-clones this repo at run time),
-  - the **`custom-isic2018` dataset** attached (`dataset_sources` — push also
-    sets this),
+  - the **`smeschke/four-shapes` dataset** attached (`dataset_sources` —
+    push also sets this; its class folders live under `shapes/`, which the
+    bootstrap's walk finds and symlinks to `<clone>/dataset/shapes`),
   - a **package-manager attachment** providing `pytorch-msssim`,
   - **2× T4 GPUs** — the run scripts auto-wrap the model in `nn.DataParallel`
     and scale `BATCH_SIZE` by `torch.cuda.device_count()`; checkpoints are
@@ -74,7 +75,7 @@ python kaggle.py runs/shapes/train_classifier.py --smoke --push-no-run  # upload
 (`--kernel owner/slug` to override). `--push-no-run` uses Kaggle's
 quick-save API (`KernelExecutionType.QUICK_SAVE`), which updates the kernel
 without starting a session; `--push-run` starts a run like `kaggle kernels push`.
-Both set GPU, internet, the `custom-isic2018` dataset attachment, and a
+Both set GPU, internet, the `smeschke/four-shapes` dataset attachment, and a
 title that matches the kernel slug.
 
 The generated `.ipynb` (default: alongside the `.py`) contains:
@@ -139,7 +140,7 @@ A push folder holds exactly two files: `kernel-metadata.json` + the generated
   "enable_tpu": "false",
   "enable_internet": "true",
   "machine_shape": "",
-  "dataset_sources": ["muplus2sigma/custom-isic2018"],
+  "dataset_sources": ["smeschke/four-shapes"],
   "competition_sources": [],
   "kernel_sources": [],
   "model_sources": []

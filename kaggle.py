@@ -29,7 +29,7 @@ import sys
 
 REPO_URL = "https://github.com/theantagonist9509/capstone.git"
 DEFAULT_KERNEL_ID = "muplus2sigma/btp-26"
-DEFAULT_DATASET_SOURCES = ["muplus2sigma/custom-isic2018"]
+DEFAULT_DATASET_SOURCES = ["smeschke/four-shapes"]
 
 # Subfolders of the attached Kaggle dataset that map onto ROOT/dataset/.
 # Extend when new datasets are wired up (see kaggle.md).
