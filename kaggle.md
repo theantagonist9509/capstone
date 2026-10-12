@@ -52,14 +52,14 @@ IPython/Jupyter and closed silently under a local Agg run.
 python tools/py2nb.py runs/shapes/train_classifier.py            # full run
 python tools/py2nb.py runs/shapes/train_classifier.py --smoke    # smoke test
 python tools/py2nb.py runs/shapes/traverse.py -o /tmp/x.ipynb    # custom output
-python tools/py2nb.py runs/shapes/train_classifier.py --smoke --push        # upload + run
-python tools/py2nb.py runs/shapes/train_classifier.py --smoke --push-only  # upload, no run
+python tools/py2nb.py runs/shapes/train_classifier.py --smoke --push-run     # upload + run
+python tools/py2nb.py runs/shapes/train_classifier.py --smoke --push-no-run  # upload, no run
 ```
 
-`--push` / `--push-only` target `muplus2sigma/capstone` by default
-(`--kernel owner/slug` to override). `--push-only` uses Kaggle's
+`--push-run` / `--push-no-run` target `muplus2sigma/capstone` by default
+(`--kernel owner/slug` to override). `--push-no-run` uses Kaggle's
 quick-save API (`KernelExecutionType.QUICK_SAVE`), which updates the kernel
-without starting a session; `--push` starts a run like `kaggle kernels push`.
+without starting a session; `--push-run` starts a run like `kaggle kernels push`.
 Both set GPU, internet, the `custom-isic2018` dataset attachment, and a
 title that matches the kernel slug.
 
@@ -74,11 +74,15 @@ since notebooks have no command line.
 
 ### What the bootstrap cell does
 
-- line-buffers stdout/stderr so prints aren't stuck in the 8KB block buffer,
 - `%matplotlib inline` so figures render in the notebook,
-- shallow-clones the repo into `/kaggle/working/capstone` and prints the
-  commit SHA (the notebook's code cells are self-contained; the clone is
-  needed for the repo's *modules* — `datasets.py`, `models.py`, …),
+- **syncs the repo clone**: `/kaggle/working` persists between runs on a
+  kernel, so an existing `/kaggle/working/capstone` is `fetch` +
+  `reset --hard FETCH_HEAD`-ed to the latest `main` (a plain "skip clone if
+  `.git` exists" check would keep running a stale version forever);
+  untracked files like `checkpoints/` survive, and a non-git leftover dir is
+  removed and re-cloned fresh. Prints the resulting commit SHA (the
+  notebook's code cells are self-contained; the clone is needed for the
+  repo's *modules* — `custom_datasets.py`, `models.py`, …),
 - finds the attached dataset by walking `/kaggle/input` for its class folders
   (the mount path is nested as
   `/kaggle/input/datasets/<owner>/<slug>/…` and has changed before — the walk
@@ -191,10 +195,9 @@ traversal notebook.
 - `__file__` inside a kernel points at `/kaggle/src/script.py` (script
   kernels) or is meaningless (notebooks) — the bootstrap re-points it into
   the clone.
-- The run scripts load our `datasets.py` **by path** via
-  `importlib` (as `capstone_datasets`) because HF's installed `datasets`
-  package shadows the repo module regardless of `sys.path` ordering (and
-  may already sit in `sys.modules`). Don't "fix" this with a plain
-  `from datasets import ...`.
+- Our dataset module is **`custom_datasets.py`** (renamed from `datasets.py`)
+  so a plain `from custom_datasets import ...` can never collide with HF's
+  installed `datasets` package — which otherwise shadows any repo module
+  named `datasets`, regardless of `sys.path` order.
 - stdout is block-buffered in non-TTY runs; the bootstrap's
   `reconfigure(line_buffering=True)` keeps prints from being lost on hangs.
