@@ -84,6 +84,15 @@ It does **not** pip-install anything (see setup note above).
 
 ## Pushing and running
 
+> **Preferred path for notebooks: manual upload in the Kaggle GUI.** CLI-pushed
+> *notebook*-type kernels (`kaggle kernels push` with `kernel_type: "notebook"`)
+> wedged twice in `RUNNING` for 30–50+ min with zero execution/log output and
+> had to be cancelled manually. Uploading the generated `.ipynb` through the
+> website and running it there works normally. Generate the file, then use
+> the GUI's upload/new-kernel flow (keep the kernel's GPU/internet/dataset/
+> package-manager settings). CLI push of *script*-type kernels was reliable
+> and remains fine when inline plots aren't needed.
+
 A push folder holds exactly two files: `kernel-metadata.json` + the generated
 `.ipynb`. Example metadata:
 
@@ -129,7 +138,9 @@ kaggle kernels output muplus2sigma/capstone -p out/   # download artifacts + log
 - **`RUNNING` includes environment setup** (machine boot, dataset mount,
   package install): several minutes are normal before any of our code runs.
   A run that "ran in 38s" can show "running for 200s"+. Long `QUEUED`
-  periods are GPU contention, not hangs.
+  periods are GPU contention, not hangs. But `RUNNING` with **zero cell
+  execution / logs for ~30+ min** (seen on CLI-pushed notebook kernels) is
+  a wedge — cancel and use the GUI upload path above.
 - **CLI logs appear only after the run ends** (`kaggle kernels logs`);
   the `logs -f` live-stream endpoint is flaky (500s). In the web GUI, logs
   may start appearing only several minutes in.
