@@ -1,14 +1,17 @@
-# ── Shapes (4-class) – ConvAutoencoder training ───────────────────────────────
+# %% [markdown]
+# # Shapes (4-class) — ConvAutoencoder training
 #
-# Trains the tiny ConvAutoencoder (models.ConvAutoencoder) on the 4-shapes
+# Trains the tiny ConvAutoencoder (`models.ConvAutoencoder`) on the 4-shapes
 # dataset. No labels are used; every image is a reconstruction target.
 #
-# Usage:
-#   python runs/shapes/train_ae.py            # full training
-#   python runs/shapes/train_ae.py --smoke    # 1 fwd+bwd sanity pass
+# **Usage**
+# - locally: `python runs/shapes/train_ae.py [--smoke]`
+# - Kaggle:  `python tools/py2nb.py runs/shapes/train_ae.py` then
+#   `kaggle kernels push` (see `kaggle.md`)
 #
-# Checkpoints: checkpoints/shapes/conv_ae/epoch_*.pth
+# **Checkpoints** — `checkpoints/shapes/conv_ae/epoch_*.pth`
 
+# %%
 import argparse
 import glob
 import os
@@ -26,8 +29,12 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from datasets import FolderDataset, TransformDataset
+from utils import maybe_show
 
-# ── Parameters ────────────────────────────────────────────────────────────────
+# %% [markdown]
+# ## Parameters
+
+# %%
 DATASET_DIR      = os.path.join(_repo_root, "dataset", "shapes")
 CHECKPOINT_DIR   = os.path.join(_repo_root, "checkpoints", "shapes", "conv_ae")
 
@@ -49,6 +56,10 @@ os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 print(f"Using device  : {DEVICE}")
 print(f"Checkpoint dir: {CHECKPOINT_DIR}")
 
+# %% [markdown]
+# ## Data
+
+# %%
 transform = transforms.Compose([
     transforms.Resize(IMAGE_SIZE),
     transforms.ToTensor(),
@@ -87,7 +98,10 @@ def run_val(model, loader, criterion, device):
             total        += imgs.size(0)
     return running_loss / total
 
+# %% [markdown]
+# ## Training
 
+# %%
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--smoke", action="store_true",
@@ -117,7 +131,7 @@ def main():
         z = model.encoder(imgs)
         print(f"[SMOKE] images {tuple(imgs.shape)} → recon {tuple(recons.shape)} "
               f"→ latent {tuple(z.shape)} → loss {loss.item():.4f} | grads ok")
-        return
+        return None
 
     # ── Resume ────────────────────────────────────────────────────────────────
     start_epoch = 1
@@ -168,7 +182,55 @@ def main():
         }, os.path.join(CHECKPOINT_DIR, f"epoch_{epoch:03d}.pth"))
 
     print("\nTraining complete.")
+    return dict(history)
 
 
 if __name__ == "__main__":
-    main()
+    history = main()
+
+# %% [markdown]
+# ## Training curves & reconstruction samples
+#
+# Left: MSE reconstruction loss on train/val. Right: a grid of val images
+# (top) vs their reconstructions (bottom) from the final model.
+
+# %%
+if history is not None and history.get("val_losses"):
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    epochs = range(1, len(history["train_losses"]) + 1)
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(epochs, history["train_losses"], label="train")
+    ax.plot(epochs, history["val_losses"],   label="val")
+    ax.set_xlabel("epoch"); ax.set_ylabel("MSE")
+    ax.set_title("Autoencoder reconstruction loss"); ax.legend(); ax.grid(alpha=0.3)
+    fig.tight_layout()
+    maybe_show(fig)
+
+    print(f"Final losses — train: {history['train_losses'][-1]:.4f} | "
+          f"val: {history['val_losses'][-1]:.4f}")
+
+    # Reconstruction grid from the final in-memory model
+    _, val_loader = build_loaders()
+    batch = next(iter(val_loader))
+    imgs = batch["image"][:8].to(DEVICE)
+    with torch.no_grad():
+        recons = model(imgs)
+
+    imgs_np    = imgs.cpu().numpy()
+    recons_np  = recons.cpu().numpy()
+    n = imgs_np.shape[0]
+    fig, axes = plt.subplots(2, n, figsize=(1.8 * n, 4.2))
+    for i in range(n):
+        axes[0, i].imshow(np.clip(imgs_np[i].transpose(1, 2, 0) * STD + MEAN, 0, 1))
+        axes[1, i].imshow(np.clip(recons_np[i].transpose(1, 2, 0) * STD + MEAN, 0, 1))
+        axes[0, i].axis("off"); axes[1, i].axis("off")
+    axes[0, 0].set_ylabel("original", fontsize=10)
+    axes[1, 0].set_ylabel("recon", fontsize=10)
+    fig.suptitle("Validation reconstructions")
+    fig.tight_layout()
+    maybe_show(fig)
+else:
+    print("[curves] no training history in this session (smoke run?) — skipping plots")

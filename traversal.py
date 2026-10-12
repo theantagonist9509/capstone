@@ -18,7 +18,7 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 import numpy as np
 
-from utils import get_orthogonal_pca_bases
+from utils import get_orthogonal_pca_bases, maybe_show
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
@@ -446,10 +446,7 @@ def plot_traversal(
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
         plt.savefig(save_path, bbox_inches="tight", dpi=150)
         print(f"Saved plot: {save_path}")
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
+    maybe_show(fig, show)
 
 
 # %%

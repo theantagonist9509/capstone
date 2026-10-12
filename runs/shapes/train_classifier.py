@@ -1,14 +1,17 @@
-# ── Shapes (4-class) – ConvClassifier training ────────────────────────────────
+# %% [markdown]
+# # Shapes (4-class) — ConvClassifier training
 #
-# Trains the tiny ConvClassifier (models.ConvClassifier) on the 4-shapes
+# Trains the tiny ConvClassifier (`models.ConvClassifier`) on the 4-shapes
 # dataset (circle / square / star / triangle) with softmax + cross-entropy.
 #
-# Usage:
-#   python runs/shapes/train_classifier.py            # full training
-#   python runs/shapes/train_classifier.py --smoke    # 1 fwd+bwd sanity pass
+# **Usage**
+# - locally: `python runs/shapes/train_classifier.py [--smoke]`
+# - Kaggle:  `python tools/py2nb.py runs/shapes/train_classifier.py` then
+#   `kaggle kernels push` (see `kaggle.md`)
 #
-# Checkpoints: checkpoints/shapes/conv_classifier/epoch_*.pth
+# **Checkpoints** — `checkpoints/shapes/conv_classifier/epoch_*.pth`
 
+# %%
 import argparse
 import glob
 import os
@@ -22,6 +25,7 @@ from sklearn.metrics import (
     accuracy_score,
     confusion_matrix,
     f1_score,
+    precision_recall_fscore_support,
     roc_auc_score,
 )
 from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
@@ -33,8 +37,12 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from datasets import FolderDataset, TransformDataset
+from utils import maybe_show
 
-# ── Parameters ────────────────────────────────────────────────────────────────
+# %% [markdown]
+# ## Parameters
+
+# %%
 DATASET_DIR      = os.path.join(_repo_root, "dataset", "shapes")
 CHECKPOINT_DIR   = os.path.join(_repo_root, "checkpoints", "shapes", "conv_classifier")
 
@@ -58,7 +66,10 @@ os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 print(f"Using device  : {DEVICE}")
 print(f"Checkpoint dir: {CHECKPOINT_DIR}")
 
-# ── Transforms ────────────────────────────────────────────────────────────────
+# %% [markdown]
+# ## Data
+
+# %%
 train_transform = transforms.Compose([
     transforms.Resize(IMAGE_SIZE),
     transforms.RandomHorizontalFlip(),
@@ -110,7 +121,10 @@ def build_loaders():
     )
     return base.class_names, train_loader, val_loader
 
+# %% [markdown]
+# ## Validation
 
+# %%
 def run_val(model, loader, criterion, device):
     model.eval()
     running_loss, total = 0.0, 0
@@ -126,18 +140,23 @@ def run_val(model, loader, criterion, device):
             all_logits.extend(logits.cpu().numpy())
             all_targets.extend(labels.cpu().numpy())
 
-    logits_arr = np.array(all_logits)
+    logits_arr  = np.array(all_logits)
     targets_arr = np.array(all_targets)
     probs   = torch.softmax(torch.tensor(logits_arr), dim=1).numpy()
     preds   = logits_arr.argmax(axis=1)
     loss_val = running_loss / total
     acc  = accuracy_score(targets_arr, preds)
-    f1   = f1_score(targets_arr, preds, average="macro", zero_division=0)
+    macro_p, macro_r, macro_f1, _ = precision_recall_fscore_support(
+        targets_arr, preds, average="macro", zero_division=0
+    )
     auc  = roc_auc_score(targets_arr, probs, multi_class="ovr", average="macro")
     cm   = confusion_matrix(targets_arr, preds)
-    return loss_val, acc, f1, auc, cm
+    return loss_val, acc, macro_p, macro_r, macro_f1, auc, cm
 
+# %% [markdown]
+# ## Training
 
+# %%
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--smoke", action="store_true",
@@ -174,7 +193,7 @@ def main():
         optimizer.step()
         print(f"[SMOKE] images {tuple(imgs.shape)} → logits {tuple(logits.shape)} "
               f"→ loss {loss.item():.4f} | grads ok")
-        return
+        return None
 
     # ── Resume ────────────────────────────────────────────────────────────────
     start_epoch = 1
@@ -211,9 +230,13 @@ def main():
         train_loss = running_loss / total
         history["train_losses"].append(train_loss)
 
-        val_loss, val_acc, val_f1, val_auc, val_cm = run_val(model, val_loader, criterion, DEVICE)
+        val_loss, val_acc, val_p, val_r, val_f1, val_auc, val_cm = run_val(
+            model, val_loader, criterion, DEVICE
+        )
         history["val_losses"].append(val_loss)
         history["val_accuracies"].append(val_acc)
+        history["val_precisions"].append(val_p)
+        history["val_recalls"].append(val_r)
         history["val_macro_f1s"].append(val_f1)
         history["val_aucs"].append(val_auc)
         history["val_conf_matrices"].append(val_cm)
@@ -222,7 +245,8 @@ def main():
         print(
             f"Epoch [{epoch:>3}/{NUM_EPOCHS}]\n"
             f"  Train Loss: {train_loss:.4f} | LR: {optimizer.param_groups[0]['lr']:.2e}\n"
-            f"  Val Loss  : {val_loss:.4f} | Acc: {val_acc:.4f} | Macro F1: {val_f1:.4f} | AUC: {val_auc:.4f}\n"
+            f"  Val Loss  : {val_loss:.4f} | Acc: {val_acc:.4f} | "
+            f"P: {val_p:.4f} | R: {val_r:.4f} | Macro F1: {val_f1:.4f} | AUC: {val_auc:.4f}\n"
             f"  Val CM:\n{val_cm}"
         )
 
@@ -235,7 +259,48 @@ def main():
         }, os.path.join(CHECKPOINT_DIR, f"epoch_{epoch:03d}.pth"))
 
     print("\nTraining complete.")
+    return dict(history)
 
 
 if __name__ == "__main__":
-    main()
+    history = main()
+
+# %% [markdown]
+# ## Training curves & final metrics
+#
+# Rendered inline when running as a notebook (Kaggle); under a local script
+# run this cell is skipped (`history` is None).
+
+# %%
+if history is not None and history.get("val_losses"):
+    import matplotlib.pyplot as plt
+
+    epochs = range(1, len(history["train_losses"]) + 1)
+
+    fig, (ax_loss, ax_acc) = plt.subplots(1, 2, figsize=(12, 4))
+    ax_loss.plot(epochs, history["train_losses"], label="train")
+    ax_loss.plot(epochs, history["val_losses"],     label="val")
+    ax_loss.set_xlabel("epoch"); ax_loss.set_ylabel("cross-entropy")
+    ax_loss.set_title("Loss"); ax_loss.legend(); ax_loss.grid(alpha=0.3)
+
+    ax_acc.plot(epochs, history["val_accuracies"], label="accuracy")
+    ax_acc.plot(epochs, history["val_precisions"], label="precision (macro)")
+    ax_acc.plot(epochs, history["val_recalls"],    label="recall (macro)")
+    ax_acc.plot(epochs, history["val_macro_f1s"],  label="F1 (macro)")
+    ax_acc.plot(epochs, history["val_aucs"],       label="ROC-AUC (macro)")
+    ax_acc.set_xlabel("epoch"); ax_acc.set_ylabel("score")
+    ax_acc.set_title("Validation metrics"); ax_acc.legend(fontsize=8); ax_acc.grid(alpha=0.3)
+
+    fig.tight_layout()
+    maybe_show(fig)
+
+    # Final breakdown on the last epoch's predictions
+    print("Final validation breakdown (last epoch):")
+    print(f"  accuracy         : {history['val_accuracies'][-1]:.4f}")
+    print(f"  precision (macro): {history['val_precisions'][-1]:.4f}")
+    print(f"  recall    (macro): {history['val_recalls'][-1]:.4f}")
+    print(f"  F1        (macro): {history['val_macro_f1s'][-1]:.4f}")
+    print(f"  ROC-AUC   (macro): {history['val_aucs'][-1]:.4f}")
+    print(f"\nConfusion matrix (last epoch):\n{history['val_conf_matrices'][-1]}")
+else:
+    print("[curves] no training history in this session (smoke run?) — skipping plots")

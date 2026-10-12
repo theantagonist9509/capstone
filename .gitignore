@@ -2,3 +2,6 @@ __pycache__/
 .ipynb_checkpoints/
 checkpoints
 dataset
+runs/shapes/out/
+runs/shapes/*.ipynb
+

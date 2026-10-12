@@ -3,6 +3,35 @@ import os
 import glob
 import torch
 
+
+# %%
+def in_ipython() -> bool:
+    """True when running under IPython / Jupyter (incl. Kaggle notebooks)."""
+    try:
+        from IPython import get_ipython
+        return get_ipython() is not None
+    except ImportError:
+        return False
+
+
+def maybe_show(fig=None, show: bool = True) -> None:
+    """
+    Show a figure only when it will actually render (IPython/notebook with an
+    interactive/inline backend). Under a plain script run with the Agg
+    backend, close it instead so nothing pops up and memory is freed.
+    """
+    import matplotlib
+    backend = matplotlib.get_backend().lower()
+    interactive = in_ipython() or backend.startswith(("module://matplotlib_inline",
+                                                      "tkagg", "qt", "nbagg", "ipympl"))
+    if show and interactive:
+        import matplotlib.pyplot as plt
+        plt.show()
+    elif not show or not interactive:
+        if fig is not None:
+            import matplotlib.pyplot as plt
+            plt.close(fig)
+
 # %%
 def load_best_model(model, checkpoint_dir, index_selector, device, pattern="epoch_*.pth"):
     existing = sorted(glob.glob(os.path.join(checkpoint_dir, pattern)))

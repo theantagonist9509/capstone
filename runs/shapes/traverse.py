@@ -1,23 +1,24 @@
-# ── Shapes (4-class) – Latent space traversal demo ────────────────────────────
+# %% [markdown]
+# # Shapes (4-class) — Latent space traversal demo
 #
 # Loads the best shapes ConvClassifier + ConvAutoencoder checkpoints and runs
-# multiclass latent traversal (traversal.py):
-#   - untargeted gradient traversal (target = second-best class, the default)
-#   - one explicitly targeted traversal
-#   - a short PCA-axis walk (sideways, iso-confidence directions)
+# multiclass latent traversal (`traversal.py`):
+# - untargeted gradient traversal (target = second-best class, the default)
+# - one explicitly targeted traversal
+# - a short PCA-axis walk (sideways, iso-confidence directions)
 #
-# Usage:
-#   python runs/shapes/traverse.py            # full demo, plots → runs/shapes/out/
-#   python runs/shapes/traverse.py --smoke    # 1 image, 2 steps, no checkpoints
+# **Usage**
+# - locally: `python runs/shapes/traverse.py [--smoke]`
+# - Kaggle:  `python tools/py2nb.py runs/shapes/traverse.py` then
+#   `kaggle kernels push` (see `kaggle.md`)
 #
-# Requires trained checkpoints in checkpoints/shapes/{conv_classifier,conv_ae}.
+# Requires trained checkpoints in `checkpoints/shapes/{conv_classifier,conv_ae}`.
 
+# %%
 import argparse
 import os
 import sys
 
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -37,13 +38,16 @@ from traversal import (
     take_latent_step,
     take_pca_step,
 )
-from utils import load_best_model, print_checkpoint_info
+from utils import load_best_model, maybe_show, print_checkpoint_info
 
-# ── Parameters ────────────────────────────────────────────────────────────────
+# %% [markdown]
+# ## Parameters
+
+# %%
 DATASET_DIR          = os.path.join(_repo_root, "dataset", "shapes")
 CLS_CHECKPOINT_DIR   = os.path.join(_repo_root, "checkpoints", "shapes", "conv_classifier")
 AE_CHECKPOINT_DIR    = os.path.join(_repo_root, "checkpoints", "shapes", "conv_ae")
-OUT_DIR              = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
+OUT_DIR              = os.path.join(_repo_root, "runs", "shapes", "out")
 
 IMAGE_SIZE           = 224
 BASE_CHANNELS        = 32
@@ -64,7 +68,10 @@ val_transform = transforms.Compose([
     transforms.Normalize([MEAN] * 3, [STD] * 3),
 ])
 
+# %% [markdown]
+# ## Helpers
 
+# %%
 def build_val_split():
     base = FolderDataset(root_dir=DATASET_DIR, transform=val_transform)
     n_total = len(base)
@@ -99,8 +106,8 @@ def save_image_grid(images, path, title=""):
     plt.tight_layout()
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     plt.savefig(path, bbox_inches="tight", dpi=150)
-    plt.close(fig)
     print(f"Saved grid: {path}")
+    maybe_show(fig)
 
 
 def select_images(val_sub, class_names, n_per_class):
@@ -114,7 +121,10 @@ def select_images(val_sub, class_names, n_per_class):
             break
     return chosen
 
+# %% [markdown]
+# ## Traversal demo
 
+# %%
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--smoke", action="store_true",
@@ -204,7 +214,6 @@ def main():
                 title=f"Shapes traversal {label_name} #{k+1} → {class_names[target_idx]}",
                 mean=[MEAN] * 3, std=[STD] * 3,
                 save_path=os.path.join(OUT_DIR, f"traverse_{label_name}_{k+1}.png"),
-                show=False,
             )
 
     # ── One explicitly targeted traversal (first image → class 0) ─────────────
@@ -221,7 +230,6 @@ def main():
         title=f"Shapes targeted traversal → {class_names[0]}",
         mean=[MEAN] * 3, std=[STD] * 3,
         save_path=os.path.join(OUT_DIR, f"traverse_targeted_{class_names[0]}.png"),
-        show=False,
     )
 
     # ── PCA-axis walk (sideways at ~constant confidence) ──────────────────────
