@@ -12,8 +12,8 @@
 # **Usage**
 # - locally: `python runs/shapes/traverse.py [--smoke]
 #            [--orth-lambdas 1.0,0.5,0.0]`
-# - Kaggle:  `python tools/py2nb.py runs/shapes/traverse.py` then
-#   `kaggle kernels push` (see `kaggle.md`)
+# - Kaggle:  `python kaggle.py runs/shapes/traverse.py` then
+#   upload/push to the `btp-26` kernel (see `kaggle.md`)
 #
 # Requires trained checkpoints in `checkpoints/shapes/{conv_classifier,conv_ae}`.
 

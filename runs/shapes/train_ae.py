@@ -10,8 +10,8 @@
 #
 # **Usage**
 # - locally: `python runs/shapes/train_ae.py [--smoke] [--ae-loss mse]`
-# - Kaggle:  `python tools/py2nb.py runs/shapes/train_ae.py` then
-#   `kaggle kernels push` (see `kaggle.md`)
+# - Kaggle:  `python kaggle.py runs/shapes/train_ae.py` then
+#   upload/push to the `btp-26` kernel (see `kaggle.md`)
 #
 # **Checkpoints** — `checkpoints/shapes/conv_ae/epoch_*.pth`
 

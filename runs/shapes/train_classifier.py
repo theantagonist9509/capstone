@@ -6,8 +6,8 @@
 #
 # **Usage**
 # - locally: `python runs/shapes/train_classifier.py [--smoke]`
-# - Kaggle:  `python tools/py2nb.py runs/shapes/train_classifier.py` then
-#   `kaggle kernels push` (see `kaggle.md`)
+# - Kaggle:  `python kaggle.py runs/shapes/train_classifier.py` then
+#   upload/push to the `btp-26` kernel (see `kaggle.md`)
 #
 # **Checkpoints** — `checkpoints/shapes/conv_classifier/epoch_*.pth`
 

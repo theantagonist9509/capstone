@@ -1,30 +1,37 @@
 # Running training on Kaggle
 
 The capstone training/traversal scripts (`runs/shapes/*.py`) are the source of
-truth. They are annotated with `# %%` cell markers so they can be converted
-into Kaggle notebooks, pushed with the Kaggle CLI, and executed on a GPU —
-with plots rendered inline in the notebook.
+truth. They are annotated with `# %%` cell markers (jupytext's light format),
+so `kaggle.py` can convert them into Kaggle notebooks with **jupytext**, push
+them with the Kaggle API, and execute them on a GPU — with plots rendered
+inline in the notebook.
 
 ```
-annotated .py  ──tools/py2nb.py──▶  .ipynb  ──kaggle kernels push──▶  run
-                                      ▲                                   │
-                        local source of truth              kernels output │
-                                                        (plots, checkpoints)
+annotated .py  ──kaggle.py (jupytext)──▶  .ipynb  ──push──▶  run
+                                            ▲                     │
+                           local source of truth          kernels output
+                                                 (plots, checkpoints)
 ```
 
 ## One-time setup
 
-- Python env: `source ~/dev/test/.venv/bin/activate` (ships `kaggle` CLI 2.2.4).
+- Python env: `source ~/dev/test/.venv/bin/activate` (ships `kaggle` CLI
+  2.2.4 and `jupytext` 1.19 — `pip install jupytext` if missing).
 - Auth: `~/.kaggle/kaggle.json` (already configured).
-- The `muplus2sigma/capstone` kernel on kaggle.com has:
+- The `muplus2sigma/btp-26` kernel on kaggle.com has:
   - **GPU** enabled,
   - **Internet** enabled (the bootstrap shallow-clones this repo at run time),
-- the **`custom-isic2018` dataset** attached (`dataset_sources`),
-- a **package-manager attachment** providing `pytorch-msssim`,
-- **2× T4 GPUs** — the run scripts auto-wrap the model in `nn.DataParallel`
-  and scale `BATCH_SIZE` by `torch.cuda.device_count()`; checkpoints are
-  always saved with unwrapped (no `module.` prefix) weights, so single- and
-  multi-GPU checkpoints are interchangeable.
+  - the **`custom-isic2018` dataset** attached (`dataset_sources` — push also
+    sets this),
+  - a **package-manager attachment** providing `pytorch-msssim`,
+  - **2× T4 GPUs** — the run scripts auto-wrap the model in `nn.DataParallel`
+    and scale `BATCH_SIZE` by `torch.cuda.device_count()`; checkpoints are
+    always saved with unwrapped (no `module.` prefix) weights, so single- and
+    multi-GPU checkpoints are interchangeable.
+- **Fresh kernels**: a push can create a missing kernel, but it can only set
+  GPU/internet/dataset sources — the **package-manager attachment**
+  (`pytorch-msssim`) must be added once in the kernel's web-UI settings, or
+  the notebooks die on `import pytorch_msssim`.
 
 **Do not `pip install` anything from within the scripts/notebooks** — the
 kernel's package-manager attachment already provides every dependency the
@@ -52,15 +59,18 @@ IPython/Jupyter and closed silently under a local Agg run.
 
 ## Converting to a notebook
 
+`kaggle.py` splits the annotated script with **jupytext** (no hand-rolled
+converter), then prepends the header + bootstrap cells (see below):
+
 ```bash
-python tools/py2nb.py runs/shapes/train_classifier.py            # full run
-python tools/py2nb.py runs/shapes/train_classifier.py --smoke    # smoke test
-python tools/py2nb.py runs/shapes/traverse.py -o /tmp/x.ipynb    # custom output
-python tools/py2nb.py runs/shapes/train_classifier.py --smoke --push-run     # upload + run
-python tools/py2nb.py runs/shapes/train_classifier.py --smoke --push-no-run  # upload, no run
+python kaggle.py runs/shapes/train_classifier.py            # full run
+python kaggle.py runs/shapes/train_classifier.py --smoke    # smoke test
+python kaggle.py runs/shapes/traverse.py -o /tmp/x.ipynb    # custom output
+python kaggle.py runs/shapes/train_classifier.py --smoke --push-run     # upload + run
+python kaggle.py runs/shapes/train_classifier.py --smoke --push-no-run  # upload, no run
 ```
 
-`--push-run` / `--push-no-run` target `muplus2sigma/capstone` by default
+`--push-run` / `--push-no-run` target `muplus2sigma/btp-26` by default
 (`--kernel owner/slug` to override). `--push-no-run` uses Kaggle's
 quick-save API (`KernelExecutionType.QUICK_SAVE`), which updates the kernel
 without starting a session; `--push-run` starts a run like `kaggle kernels push`.
@@ -71,10 +81,12 @@ The generated `.ipynb` (default: alongside the `.py`) contains:
 
 1. a markdown header,
 2. a **bootstrap cell** (Kaggle setup, see below),
-3. the script's own `# %%` cells in order.
+3. the script's own `# %%` cells in order (parsed by jupytext).
 
-`py2nb` bakes the script's CLI argv into the bootstrap cell (`--smoke` etc.),
-since notebooks have no command line.
+`kaggle.py` bakes the script's CLI argv into the bootstrap cell (`--smoke`
+etc.), since notebooks have no command line. A bare `jupytext --to ipynb`
+would give you cells 1+3 but *not* the bootstrap — such a notebook cannot
+run on Kaggle.
 
 ### What the bootstrap cell does
 
@@ -108,15 +120,17 @@ It does **not** pip-install anything (see setup note above).
 > website and running it there works normally. Generate the file, then use
 > the GUI's upload/new-kernel flow (keep the kernel's GPU/internet/dataset/
 > package-manager settings). CLI push of *script*-type kernels was reliable
-> and remains fine when inline plots aren't needed.
+> and remains fine when inline plots aren't needed. (`kaggle.py --push-no-run`
+> — the quick-save API — has worked fine for staging notebook *sources*
+> without starting a wedged run.)
 
 A push folder holds exactly two files: `kernel-metadata.json` + the generated
 `.ipynb`. Example metadata:
 
 ```json
 {
-  "id": "muplus2sigma/capstone",
-  "title": "capstone",
+  "id": "muplus2sigma/btp-26",
+  "title": "btp-26",
   "code_file": "train_classifier.ipynb",
   "language": "python",
   "kernel_type": "notebook",
@@ -144,10 +158,10 @@ Gotchas:
 
 ```bash
 kaggle kernels push -p <push-folder>            # upload + start a run (new version)
-kaggle kernels status muplus2sigma/capstone    # QUEUED / RUNNING / COMPLETE / ERROR
-kaggle kernels logs  muplus2sigma/capstone     # full stdout+stderr (after run ends)
-kaggle kernels files muplus2sigma/capstone     # list /kaggle/working artifacts
-kaggle kernels output muplus2sigma/capstone -p out/   # download artifacts + logs
+kaggle kernels status muplus2sigma/btp-26       # QUEUED / RUNNING / COMPLETE / ERROR
+kaggle kernels logs  muplus2sigma/btp-26        # full stdout+stderr (after run ends)
+kaggle kernels files muplus2sigma/btp-26        # list /kaggle/working artifacts
+kaggle kernels output muplus2sigma/btp-26 -p out/   # download artifacts + logs
 ```
 
 ## Observability — what to expect
@@ -172,22 +186,22 @@ kaggle kernels output muplus2sigma/capstone -p out/   # download artifacts + log
 ## Fetching results
 
 ```bash
-kaggle kernels output muplus2sigma/capstone -p out/          # everything
-kaggle kernels output muplus2sigma/capstone -p out/ \
+kaggle kernels output muplus2sigma/btp-26 -p out/          # everything
+kaggle kernels output muplus2sigma/btp-26 -p out/ \
     --file-pattern '.*\.png'                                 # just the plots
-kaggle kernels output muplus2sigma/capstone -p out/ \
+kaggle kernels output muplus2sigma/btp-26 -p out/ \
     --file-pattern '.*conv_ae.*epoch_.*\.pth'                # AE checkpoints
 ```
 
 `kaggle kernels output` also drops a `<kernel>.log` copy of the run's logs
 next to the downloaded files. Checkpoints land under
-`out/capstone/checkpoints/...` (paths inside `/kaggle/working` are
-preserved); copy them into the local `checkpoints/` tree as needed for the
-traversal notebook.
+`out/capstone/checkpoints/...` (the clone dir inside `/kaggle/working` is
+always named `capstone`, regardless of the kernel slug); copy them into the
+local `checkpoints/` tree as needed for the traversal notebook.
 
 ## Smoke-first workflow
 
-1. `python tools/py2nb.py runs/shapes/<script>.py --smoke`
+1. `python kaggle.py runs/shapes/<script>.py --smoke`
 2. push; wait for `COMPLETE`; `kaggle kernels logs` — look for
    `[bootstrap] GPU: Tesla T4` and the `[SMOKE] …` marker lines.
 3. If green, push the full (non-`--smoke`) notebook and let it train.
@@ -203,5 +217,7 @@ traversal notebook.
   so a plain `from custom_datasets import ...` can never collide with HF's
   installed `datasets` package — which otherwise shadows any repo module
   named `datasets`, regardless of `sys.path` order.
-- stdout is block-buffered in non-TTY runs; the bootstrap's
-  `reconfigure(line_buffering=True)` keeps prints from being lost on hangs.
+- The helper itself is named **`kaggle.py`** at the repo root, which shadows
+  the installed `kaggle` package under `python kaggle.py` (sys.path[0] is the
+  script's dir) — its push code imports the real package with the repo root
+  temporarily removed from `sys.path`.
