@@ -125,6 +125,7 @@ def take_latent_step(
     direction: float,
     optimizer: torch.optim.Optimizer,
     orthogonal: bool = False,
+    orth_lambda: float = 1.0,
     target_class: int = None,
 ):
     """
@@ -141,6 +142,14 @@ def take_latent_step(
     orthogonal=True: before applying the step, the score gradient is
     orthogonally projected relative to V = d(err)/dz, where
     err = recon_loss_fn(recon, recon'), recon' = decoder(encoder(recon)).
+
+    orth_lambda (only used when orthogonal=True) controls the projection
+    strength — PARTIAL orthogonal projection:
+        G ← G − λ · ((G·V)/‖V‖²) · V
+      λ = 1.0 : full projection (stays on the recon manifold; invisible flips)
+      λ = 0.0 : raw gradient (fast flips, possible artifacts)
+      0<λ<1   : trade-off — keeps most of the manifold constraint while
+                allowing a visible change before the boundary.
     """
     optimizer.zero_grad()
     logits = classifier_model(ae_model.decoder(z))
@@ -165,8 +174,8 @@ def take_latent_step(
 
         G_flat, V_flat = z.grad.view(-1), V.view(-1)
         V_norm_sq = (V_flat * V_flat).sum()
-        if V_norm_sq.item() > 1e-12:
-            G_flat = G_flat - (G_flat @ V_flat) / V_norm_sq * V_flat
+        if orth_lambda != 0.0 and V_norm_sq.item() > 1e-12:
+            G_flat = G_flat - orth_lambda * (G_flat @ V_flat) / V_norm_sq * V_flat
         z.grad = G_flat.view_as(z.grad)
 
     optimizer.step()
@@ -221,6 +230,7 @@ def extrapolate_image(
     optimizer_cls=torch.optim.Adam,
     optimizer_kwargs=None,
     orthogonal: bool = True,
+    orth_lambda: float = 1.0,
     target_prob: float = 0.75,
     target="auto",
 ):
@@ -231,7 +241,8 @@ def extrapolate_image(
     The gradient is recomputed at every step so the direction tracks the local
     manifold geometry. orthogonal=True projects each score gradient orthogonal
     to V = d(err)/dz (err = recon loop loss) to preserve reconstruction
-    fidelity.
+    fidelity; orth_lambda ∈ [0,1] sets the projection strength (1 = full
+    projection, 0 = raw gradient — see take_latent_step).
 
     target="auto" (default): the second-best class w.r.t. the initial
     prediction — for 1-logit binary classifiers this is exactly the legacy
@@ -245,7 +256,8 @@ def extrapolate_image(
     if optimizer_kwargs is None:
         optimizer_kwargs = {"lr": 0.05}
 
-    tag = "[Orthogonal]" if orthogonal else "[Raw]"
+    tag = (f"[Orthogonal λ={orth_lambda:g}]" if orthogonal and orth_lambda != 1.0
+           else "[Orthogonal]" if orthogonal else "[Raw]")
     actual_idx = int(actual_label_onehot.argmax().item())  # works for (K,) or (1,K)
     img_tensor = img_tensor.to(device)
     print(f"\n{tag} Extrapolating image of actual class {class_names[actual_idx]}...")
@@ -305,6 +317,7 @@ def extrapolate_image(
             direction,
             optimizer,
             orthogonal,
+            orth_lambda=orth_lambda,
             target_class=target_idx,
         )
 

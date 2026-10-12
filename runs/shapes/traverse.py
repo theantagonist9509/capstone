@@ -3,12 +3,15 @@
 #
 # Loads the best shapes ConvClassifier + ConvAutoencoder checkpoints and runs
 # multiclass latent traversal (`traversal.py`):
-# - untargeted gradient traversal (target = second-best class, the default)
-# - one explicitly targeted traversal
+# - untargeted gradient traversal (target = second-best class, the default),
+#   swept over a list of partial-orthogonal λ values (1 = full projection /
+#   invisible flips, 0 = raw gradient / possible artifacts)
+# - one explicitly targeted traversal (same λ sweep)
 # - a short PCA-axis walk (sideways, iso-confidence directions)
 #
 # **Usage**
-# - locally: `python runs/shapes/traverse.py [--smoke]`
+# - locally: `python runs/shapes/traverse.py [--smoke]
+#            [--orth-lambdas 1.0,0.5,0.0]`
 # - Kaggle:  `python tools/py2nb.py runs/shapes/traverse.py` then
 #   `kaggle kernels push` (see `kaggle.md`)
 #
@@ -149,7 +152,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--smoke", action="store_true",
                         help="1 image, 2 steps, random-init models, no checkpoints")
+    parser.add_argument("--orth-lambdas", default="1.0,0.5,0.0",
+                        help="comma-separated partial-orthogonal strengths for the "
+                             "gradient traversals: 1.0 = full projection (paper "
+                             "baseline), 0.0 = raw gradient. Use '1.0' alone to "
+                             "reproduce the old single-λ behaviour.")
     args = parser.parse_args()
+
+    orth_lambdas = [float(s) for s in args.orth_lambdas.split(",") if s.strip()]
+    if not orth_lambdas:
+        parser.error("--orth-lambdas must contain at least one value")
+    print(f"Orthogonal λ sweep: {orth_lambdas}")
 
     class_names, val_sub = build_val_split()
     print(f"Val split size: {len(val_sub)} | classes: {class_names}")
@@ -169,7 +182,7 @@ def main():
         results = extrapolate_image(
             img, lbl, classifier_model, ae_model, rloss,
             class_names=class_names, device=DEVICE,
-            steps=2, orthogonal=True, target="auto",
+            steps=2, orthogonal=True, orth_lambda=0.5, target="auto",
         )
         imgs, probs, errs, gnorms, pred_idxs, target_idx = results
         assert len(imgs) == 3  # initial + 2 steps
@@ -226,38 +239,47 @@ def main():
             print(f"Skipping class '{label_name}' — no correctly-classified images.")
             continue
         for k, (img, lbl) in enumerate(chosen[lbl_idx]):
-            results = extrapolate_image(
-                img.unsqueeze(0), lbl, classifier_model, ae_model, rloss,
-                class_names=class_names, device=DEVICE,
-                steps=STEPS, orthogonal=True, target_prob=TARGET_PROB, target="auto",
-            )
-            imgs, probs, errs, gnorms, pred_idxs, target_idx = results
-            plot_traversal(
-                imgs, probs, errs, gnorms,
-                pred_idxs=pred_idxs, class_names=class_names,
-                title=f"Shapes traversal {label_name} #{k+1} → {class_names[target_idx]}",
-                mean=[MEAN] * 3, std=[STD] * 3,
-                save_path=os.path.join(OUT_DIR, f"traverse_{label_name}_{k+1}.png"),
-            )
+            for lam in orth_lambdas:
+                results = extrapolate_image(
+                    img.unsqueeze(0), lbl, classifier_model, ae_model, rloss,
+                    class_names=class_names, device=DEVICE,
+                    steps=STEPS, orthogonal=True, orth_lambda=lam,
+                    target_prob=TARGET_PROB, target="auto",
+                )
+                imgs, probs, errs, gnorms, pred_idxs, target_idx = results
+                plot_traversal(
+                    imgs, probs, errs, gnorms,
+                    pred_idxs=pred_idxs, class_names=class_names,
+                    title=f"Shapes traversal {label_name} #{k+1} → "
+                          f"{class_names[target_idx]} (orth λ={lam:g})",
+                    mean=[MEAN] * 3, std=[STD] * 3,
+                    save_path=os.path.join(
+                        OUT_DIR, f"traverse_{label_name}_{k+1}_lam{lam:g}.png"
+                    ),
+                )
 
     # ── One explicitly targeted traversal (first correct image → class 0) ─────
     first_available = next((i for i in range(len(class_names)) if chosen[i]), None)
     if first_available is None:
         raise SystemExit("No correctly-classified images available to traverse.")
     img0, lbl0 = chosen[first_available][0]
-    results = extrapolate_image(
-        img0.unsqueeze(0), lbl0, classifier_model, ae_model, rloss,
-        class_names=class_names, device=DEVICE,
-        steps=STEPS, orthogonal=True, target_prob=TARGET_PROB, target=0,
-    )
-    imgs, probs, errs, gnorms, pred_idxs, target_idx = results
-    plot_traversal(
-        imgs, probs, errs, gnorms,
-        pred_idxs=pred_idxs, class_names=class_names,
-        title=f"Shapes targeted traversal → {class_names[0]}",
-        mean=[MEAN] * 3, std=[STD] * 3,
-        save_path=os.path.join(OUT_DIR, f"traverse_targeted_{class_names[0]}.png"),
-    )
+    for lam in orth_lambdas:
+        results = extrapolate_image(
+            img0.unsqueeze(0), lbl0, classifier_model, ae_model, rloss,
+            class_names=class_names, device=DEVICE,
+            steps=STEPS, orthogonal=True, orth_lambda=lam,
+            target_prob=TARGET_PROB, target=0,
+        )
+        imgs, probs, errs, gnorms, pred_idxs, target_idx = results
+        plot_traversal(
+            imgs, probs, errs, gnorms,
+            pred_idxs=pred_idxs, class_names=class_names,
+            title=f"Shapes targeted traversal → {class_names[0]} (orth λ={lam:g})",
+            mean=[MEAN] * 3, std=[STD] * 3,
+            save_path=os.path.join(
+                OUT_DIR, f"traverse_targeted_{class_names[0]}_lam{lam:g}.png"
+            ),
+        )
 
     # ── PCA-axis walk (sideways at ~constant confidence) ──────────────────────
     with torch.no_grad():

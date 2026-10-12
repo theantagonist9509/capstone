@@ -4,8 +4,12 @@
 # Trains the tiny ConvAutoencoder (`models.ConvAutoencoder`) on the 4-shapes
 # dataset. No labels are used; every image is a reconstruction target.
 #
+# **Loss** — default `ms_ssim` (paper's final pipeline trained the AE with
+# MS-SSIM, matching the reconstruction-loop loss used for the traversal's
+# orthogonal constraint). Pass `--ae-loss mse` for the old criterion.
+#
 # **Usage**
-# - locally: `python runs/shapes/train_ae.py [--smoke]`
+# - locally: `python runs/shapes/train_ae.py [--smoke] [--ae-loss mse]`
 # - Kaggle:  `python tools/py2nb.py runs/shapes/train_ae.py` then
 #   `kaggle kernels push` (see `kaggle.md`)
 #
@@ -114,6 +118,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--smoke", action="store_true",
                         help="single fwd+bwd sanity pass, no checkpointing")
+    parser.add_argument("--ae-loss", choices=["mse", "ms_ssim"], default="ms_ssim",
+                        help="reconstruction criterion (paper's final pipeline: ms_ssim)")
     args = parser.parse_args()
 
     train_loader, val_loader = build_loaders()
@@ -129,7 +135,15 @@ def main():
     # Checkpoints always store the unwrapped weights (same layout on 1–2 GPUs).
     model_core = model.module if isinstance(model, nn.DataParallel) else model
 
-    criterion = nn.MSELoss()
+    if args.ae_loss == "ms_ssim":
+        from losses import MS_SSIMLoss
+        criterion = MS_SSIMLoss(
+            channels=3,
+            denorm_mean=torch.tensor([MEAN] * 3),
+            denorm_std=torch.tensor([STD] * 3),
+        ).to(DEVICE)
+    else:
+        criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
     if args.smoke:
@@ -142,7 +156,8 @@ def main():
         optimizer.step()
         z = model_core.encoder(imgs)
         print(f"[SMOKE] images {tuple(imgs.shape)} → recon {tuple(recons.shape)} "
-              f"→ latent {tuple(z.shape)} → loss {loss.item():.4f} | grads ok")
+              f"→ latent {tuple(z.shape)} → loss {loss.item():.4f} ({args.ae_loss}) "
+              f"| grads ok")
         return None, model
 
     # ── Resume ────────────────────────────────────────────────────────────────
@@ -151,22 +166,28 @@ def main():
     existing    = sorted(glob.glob(os.path.join(CHECKPOINT_DIR, "epoch_*.pth")))
     if existing:
         ckpt = torch.load(existing[-1], map_location=DEVICE, weights_only=False)
+        reason = None
         try:
             model_core.load_state_dict(ckpt["model_state"])
         except RuntimeError:
-            # e.g. latent-size change: quarantine unusable old-arch checkpoints
-            # so this run (and later traverse.py) don't trip over them.
+            reason = "architecture changed (latent size?)"
+        if reason is None and ckpt.get("ae_loss", "mse") != args.ae_loss:
+            # pre-ae_loss-key checkpoints were MSE-trained; mixed-criterion
+            # curves would be meaningless — restart rather than resume.
+            reason = f"criterion changed {ckpt.get('ae_loss', 'mse')} -> {args.ae_loss}"
+        if reason is not None:
             stale_dir = os.path.join(CHECKPOINT_DIR, "stale_old_arch")
             os.makedirs(stale_dir, exist_ok=True)
             for f in existing:
                 os.replace(f, os.path.join(stale_dir, os.path.basename(f)))
-            print(f"Architecture changed — moved {len(existing)} old checkpoint(s) "
-                  f"to {stale_dir}; starting fresh.")
+            print(f"Checkpoint incompatible: {reason} — moved {len(existing)} "
+                  f"old checkpoint(s) to {stale_dir}; starting fresh.")
         else:
             start_epoch = ckpt["epoch"] + 1
             history     = ckpt["history"]
             optimizer.load_state_dict(ckpt["optim_state"])
             print(f"Resumed from '{existing[-1]}' (epoch {ckpt['epoch']})")
+    history["ae_loss"] = args.ae_loss
 
     # ── Train ─────────────────────────────────────────────────────────────────
     for epoch in range(start_epoch, NUM_EPOCHS + 1):
@@ -214,8 +235,9 @@ if __name__ == "__main__":
 # %% [markdown]
 # ## Training curves & reconstruction samples
 #
-# Left: MSE reconstruction loss on train/val. Right: a grid of val images
-# (top) vs their reconstructions (bottom) from the final model.
+# Left: reconstruction loss on train/val (MS-SSIM or MSE, per checkpoint).
+# Right: a grid of val images (top) vs their reconstructions (bottom) from
+# the final model.
 
 # %%
 if history is not None and history.get("val_losses"):
@@ -227,7 +249,9 @@ if history is not None and history.get("val_losses"):
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.plot(epochs, history["train_losses"], label="train")
     ax.plot(epochs, history["val_losses"],   label="val")
-    ax.set_xlabel("epoch"); ax.set_ylabel("MSE")
+    ax.set_xlabel("epoch")
+    loss_name = history.get("ae_loss", "mse")
+    ax.set_ylabel({"mse": "MSE", "ms_ssim": "1 − MS-SSIM"}.get(loss_name, loss_name))
     ax.set_title("Autoencoder reconstruction loss"); ax.legend(); ax.grid(alpha=0.3)
     fig.tight_layout()
     maybe_show(fig)
