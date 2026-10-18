@@ -192,11 +192,11 @@ class ConvClassifier(nn.Module):
 # %%
 # ── Model – Tiny Conv Autoencoder (fast multiclass iteration) ────────────────
 #
-# Mirrors ConvClassifier's encoder stack (5 stride-2 stages → H/32) plus two
-# extra stride-2 bottleneck stages, giving a compact spatial latent of
-# (B, 16b, 2, 2) for 224×224 inputs (4 spatial locations instead of 49).
+# Mirrors ConvClassifier's encoder stack (5 stride-2 stages → H/32) plus one
+# extra stride-2 bottleneck stage, giving a spatial latent of
+# (B, 16b, 4, 4) for 224×224 inputs (16 spatial locations instead of 49).
 # The decoder first bilinearly upsamples the latent back to the H/32 grid
-# (2 → 7) and then runs the symmetric ConvTranspose2d stack up to 224.
+# (4 → 7) and then runs the symmetric ConvTranspose2d stack up to 224.
 # No final activation — inputs are expected to be normalised, same
 # convention as NVMELAutoencoder.
 
@@ -208,7 +208,7 @@ class ConvAutoencoder(nn.Module):
         channels = [base_channels * (2 ** i) for i in range(5)]  # b..16b, /32 total
         grid_hw = image_size // 32          # 224 → 7 (decoder grid)
         latent_hw = grid_hw
-        for _ in range(2):                  # two extra k3/s2/p1 stages: 7 → 4 → 2
+        for _ in range(1):                  # one extra k3/s2/p1 stage: 7 → 4
             latent_hw = (latent_hw - 1) // 2 + 1
 
         enc = [
@@ -222,14 +222,14 @@ class ConvAutoencoder(nn.Module):
                 nn.BatchNorm2d(channels[i + 1]),
                 nn.ReLU(inplace=True),
             ]
-        for _ in range(2):
+        for _ in range(1):
             enc += [
                 nn.Conv2d(channels[4], channels[4], kernel_size=3, stride=2, padding=1, bias=False),
                 nn.BatchNorm2d(channels[4]),
                 nn.ReLU(inplace=True),
             ]
         self.encoder = nn.Sequential(*enc)
-        # encoder output: (B, 16 * base_channels, latent_hw, latent_hw) → 2×2
+        # encoder output: (B, 16 * base_channels, latent_hw, latent_hw) → 4×4
 
         dec = [
             nn.Upsample(size=(grid_hw, grid_hw), mode="bilinear", align_corners=False),
@@ -251,7 +251,8 @@ class ConvAutoencoder(nn.Module):
 # %%
 # ── Model – Tiny Conv VAE (AE experiment: smoother latent manifold) ─────────
 #
-# Same trunk/decoder geometry as ConvAutoencoder — latent (B, 16b, 2, 2) for
+# Same trunk pattern as ConvAutoencoder but keeps BOTH extra bottleneck
+# stages (7 → 4 → 2) — latent (B, 16b, 2, 2) for
 # 224×224 — but the trunk output is projected by two 1×1 conv heads into a
 # diagonal Gaussian q(z|x) = N(mu, exp(logvar)); z is drawn with the
 # reparameterisation trick. The KL term pulls q toward N(0, I), which is the

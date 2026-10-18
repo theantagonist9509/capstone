@@ -14,6 +14,12 @@
 #   upload/push to the `btp-26` kernel (see `kaggle.md`)
 #
 # **Checkpoints** — `checkpoints/shapes/conv_ae/epoch_*.pth`
+#
+# NUM_EPOCHS is the TOTAL number of epochs (even across resumes): a fresh
+# run trains 1..NUM_EPOCHS; a re-run resumes from the latest checkpoint and
+# continues up to NUM_EPOCHS (a completed run trains nothing). An
+# architecture/criterion change quarantines old checkpoints instead of
+# resuming (see the Resume block).
 
 # %%
 import argparse
@@ -189,7 +195,7 @@ def main():
             print(f"Resumed from '{existing[-1]}' (epoch {ckpt['epoch']})")
     history["ae_loss"] = args.ae_loss
 
-    # ── Train ─────────────────────────────────────────────────────────────────
+    # ── Train (resumes toward the NUM_EPOCHS total) ───────────────────────────
     for epoch in range(start_epoch, NUM_EPOCHS + 1):
         model.train()
         running_loss, total = 0.0, 0

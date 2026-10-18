@@ -1,15 +1,23 @@
 # %% [markdown]
 # # Shapes (4-class) — ConvClassifier training
 #
-# Trains the tiny ConvClassifier (`models.ConvClassifier`) on the 4-shapes
-# dataset (circle / square / star / triangle) with softmax + cross-entropy.
+# Trains `NUM_CLASSIFIERS` independent ConvClassifier (`models.ConvClassifier`)
+# runs on the 4-shapes dataset (circle / square / star / triangle) with softmax
+# + cross-entropy — one per seed in `RUN_SEEDS` (`SEED .. SEED+N-1`). The
+# train/val split is IDENTICAL across runs (fixed by `SEED`); each run differs
+# only in weight init and sampler/augmentation order (per-run `torch.manual_seed`),
+# so validation metrics are directly comparable across the ensemble — the seed
+# spread is what the noise-vs-signal tests will use.
 #
 # **Usage**
 # - locally: `python runs/shapes/train_classifier.py [--smoke]`
 # - Kaggle:  `python kaggle.py runs/shapes/train_classifier.py` then
 #   upload/push to the `btp-26` kernel (see `kaggle.md`)
 #
-# **Checkpoints** — `checkpoints/shapes/conv_classifier/epoch_*.pth`
+# **Checkpoints** — `checkpoints/shapes/conv_classifier/seed_<seed>/epoch_*.pth`
+# (one subdir per run; re-running resumes/skips per seed independently).
+# Consumers (e.g. `runs/shapes/traverse.py --classifier-seed N`) load from one
+# of these subdirs.
 
 # %%
 import argparse
@@ -56,6 +64,8 @@ NUM_EPOCHS       = 10
 LABEL_SMOOTHING  = 0.1
 VAL_SPLIT        = 0.2
 SEED             = 42
+NUM_CLASSIFIERS  = 10         # independent runs; seeds SEED .. SEED+N-1
+RUN_SEEDS        = [SEED + i for i in range(NUM_CLASSIFIERS)]
 DEVICE           = "cuda" if torch.cuda.is_available() else "cpu"
 NUM_GPUS         = torch.cuda.device_count()
 BATCH_SIZE       = BATCH_SIZE_PER_GPU * max(1, NUM_GPUS)
@@ -68,6 +78,7 @@ os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 print(f"Using device  : {DEVICE} | {NUM_GPUS} GPU(s) | "
       f"batch {BATCH_SIZE} | workers {NUM_WORKERS}")
 print(f"Checkpoint dir: {CHECKPOINT_DIR}")
+print(f"Classifiers   : {NUM_CLASSIFIERS} runs | seeds {RUN_SEEDS}")
 
 # %% [markdown]
 # ## Data
@@ -97,6 +108,9 @@ val_transform = transforms.Compose([
 
 
 def build_loaders():
+    # The split generator is seeded with the FIXED SEED (not the per-run seed),
+    # so every classifier sees the same train/val partition — only the sampler
+    # draw order / augmentations / init differ across runs (global torch RNG).
     base = FolderDataset(root_dir=DATASET_DIR, transform=None)
     n_total = len(base)
     n_val   = int(n_total * VAL_SPLIT)
@@ -165,14 +179,7 @@ def run_val(model, loader, criterion, device):
 # ## Training
 
 # %%
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--smoke", action="store_true",
-                        help="single fwd+bwd sanity pass, no checkpointing")
-    args = parser.parse_args()
-
-    class_names, train_loader, val_loader = build_loaders()
-
+def make_model(class_names):
     from models import ConvClassifier
     model = ConvClassifier(
         num_classes=len(class_names),
@@ -183,6 +190,21 @@ def main():
     ).to(DEVICE)
     if NUM_GPUS > 1:
         model = nn.DataParallel(model)
+    return model
+
+
+def train_one(run_seed, class_names):
+    """Train (or resume) one classifier; checkpoints go to
+    CHECKPOINT_DIR/seed_<run_seed>/. Returns the run's history dict."""
+    run_dir = os.path.join(CHECKPOINT_DIR, f"seed_{run_seed}")
+    os.makedirs(run_dir, exist_ok=True)
+
+    # Fresh RNG for this run: different weight init + sampler/aug order.
+    # (The data split itself is fixed — see build_loaders.)
+    torch.manual_seed(run_seed)
+
+    _, train_loader, val_loader = build_loaders()
+    model = make_model(class_names)
     # Checkpoints always store the unwrapped weights (same layout on 1–2 GPUs).
     model_core = model.module if isinstance(model, nn.DataParallel) else model
 
@@ -194,37 +216,30 @@ def main():
         optimizer, mode="min", factor=0.5, patience=2, min_lr=1e-6
     )
 
-    if args.smoke:
-        smoke_ds = Subset(train_loader.dataset, list(range(8)))
-        imgs   = torch.stack([smoke_ds[i]["image"] for i in range(8)]).to(DEVICE)
-        labels = torch.stack([smoke_ds[i]["label"] for i in range(8)]).argmax(dim=1).to(DEVICE)
-        logits = model(imgs)
-        loss   = criterion(logits, labels)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        print(f"[SMOKE] images {tuple(imgs.shape)} → logits {tuple(logits.shape)} "
-              f"→ loss {loss.item():.4f} | grads ok")
-        return None
-
     # ── Resume ────────────────────────────────────────────────────────────────
     start_epoch = 1
     history     = defaultdict(list)
-    existing    = sorted(glob.glob(os.path.join(CHECKPOINT_DIR, "epoch_*.pth")))
+    existing    = sorted(glob.glob(os.path.join(run_dir, "epoch_*.pth")))
     if existing:
         ckpt = torch.load(existing[-1], map_location=DEVICE, weights_only=False)
+        if ckpt["epoch"] >= NUM_EPOCHS:
+            print(f"[seed {run_seed}] already trained (epoch {ckpt['epoch']}) — "
+                  f"reusing history, skipping training.")
+            return ckpt["history"]
         start_epoch = ckpt["epoch"] + 1
         history     = ckpt["history"]
         model_core.load_state_dict(ckpt["model_state"])
         optimizer.load_state_dict(ckpt["optim_state"])
         scheduler.load_state_dict(ckpt["sched_state"])
-        print(f"Resumed from '{existing[-1]}' (epoch {ckpt['epoch']})")
+        print(f"[seed {run_seed}] resumed from '{existing[-1]}' (epoch {ckpt['epoch']})")
 
     # ── Train ─────────────────────────────────────────────────────────────────
     for epoch in range(start_epoch, NUM_EPOCHS + 1):
         model.train()
         running_loss, total = 0.0, 0
-        pbar = tqdm(train_loader, desc=f"Epoch [{epoch:>3}/{NUM_EPOCHS}] train", leave=False)
+        pbar = tqdm(train_loader,
+                    desc=f"seed {run_seed} | epoch [{epoch:>3}/{NUM_EPOCHS}] train",
+                    leave=False)
         for batch in pbar:
             imgs   = batch["image"].to(DEVICE, non_blocking=True)
             labels = batch["label"].argmax(dim=1).to(DEVICE, non_blocking=True)
@@ -255,7 +270,7 @@ def main():
 
         scheduler.step(val_loss)
         print(
-            f"Epoch [{epoch:>3}/{NUM_EPOCHS}]\n"
+            f"[seed {run_seed}] Epoch [{epoch:>3}/{NUM_EPOCHS}]\n"
             f"  Train Loss: {train_loss:.4f} | LR: {optimizer.param_groups[0]['lr']:.2e}\n"
             f"  Val Loss  : {val_loss:.4f} | Acc: {val_acc:.4f} | "
             f"P: {val_p:.4f} | R: {val_r:.4f} | Macro F1: {val_f1:.4f} | AUC: {val_auc:.4f}\n"
@@ -264,55 +279,121 @@ def main():
 
         torch.save({
             "epoch"       : epoch,
+            "seed"        : run_seed,
             "history"     : dict(history),
             "model_state" : model_core.state_dict(),
             "optim_state" : optimizer.state_dict(),
             "sched_state" : scheduler.state_dict(),
-        }, os.path.join(CHECKPOINT_DIR, f"epoch_{epoch:03d}.pth"))
+        }, os.path.join(run_dir, f"epoch_{epoch:03d}.pth"))
 
-    print("\nTraining complete.")
     return dict(history)
 
 
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--smoke", action="store_true",
+                        help="single fwd+bwd sanity pass on one seed, no checkpointing")
+    args = parser.parse_args()
+
+    class_names, _, _ = build_loaders()
+
+    if args.smoke:
+        torch.manual_seed(RUN_SEEDS[0])
+        _, train_loader, _ = build_loaders()
+        model = make_model(class_names)
+        criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
+        optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+        smoke_ds = Subset(train_loader.dataset, list(range(8)))
+        imgs   = torch.stack([smoke_ds[i]["image"] for i in range(8)]).to(DEVICE)
+        labels = torch.stack([smoke_ds[i]["label"] for i in range(8)]).argmax(dim=1).to(DEVICE)
+        logits = model(imgs)
+        loss   = criterion(logits, labels)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        print(f"[SMOKE] seed {RUN_SEEDS[0]} | images {tuple(imgs.shape)} → "
+              f"logits {tuple(logits.shape)} → loss {loss.item():.4f} | grads ok")
+        return None
+
+    # ── Train every seed (resumes/skips per seed independently) ───────────────
+    histories = {}
+    for i, run_seed in enumerate(RUN_SEEDS, start=1):
+        print(f"\n{'=' * 70}\nClassifier run {i}/{NUM_CLASSIFIERS} — seed {run_seed}\n{'=' * 70}")
+        histories[run_seed] = train_one(run_seed, class_names)
+
+    # ── Ensemble summary: seed spread is the noise-vs-signal signal ───────────
+    print(f"\n{'=' * 70}\nSummary across {len(histories)} classifiers\n{'=' * 70}")
+    best_f1s, best_accs, best_aucs, final_f1s = [], [], [], []
+    for run_seed, h in histories.items():
+        best_epoch = int(np.argmax(np.array(h["val_macro_f1s"])))
+        best_f1  = h["val_macro_f1s"][best_epoch]
+        best_acc = h["val_accuracies"][best_epoch]
+        best_auc = h["val_aucs"][best_epoch]
+        best_f1s.append(best_f1); best_accs.append(best_acc); best_aucs.append(best_auc)
+        final_f1s.append(h["val_macro_f1s"][-1])
+        print(f"  seed {run_seed}: best-F1 {best_f1:.4f} @ epoch {best_epoch + 1} | "
+              f"best acc {best_acc:.4f} | best AUC {best_auc:.4f} | "
+              f"final F1 {h['val_macro_f1s'][-1]:.4f}")
+    print(f"\nBest-F1 across seeds : mean {np.mean(best_f1s):.4f} ± {np.std(best_f1s):.4f} "
+          f"(min {min(best_f1s):.4f}, max {max(best_f1s):.4f})")
+    print(f"Best-acc across seeds: mean {np.mean(best_accs):.4f} ± {np.std(best_accs):.4f}")
+    print(f"Best-AUC across seeds: mean {np.mean(best_aucs):.4f} ± {np.std(best_aucs):.4f}")
+    print(f"Final-F1 across seeds: mean {np.mean(final_f1s):.4f} ± {np.std(final_f1s):.4f}")
+
+    return histories
+
+
 if __name__ == "__main__":
-    history = main()
+    histories = main()
 
 # %% [markdown]
-# ## Training curves & final metrics
+# ## Training curves & ensemble summary
 #
+# One curve per seed (thin), plus the cross-seed mean where lengths align.
 # Rendered inline when running as a notebook (Kaggle); under a local script
-# run this cell is skipped (`history` is None).
+# run this cell is skipped (`histories` is None).
 
 # %%
-if history is not None and history.get("val_losses"):
+if histories:
     import matplotlib.pyplot as plt
 
-    epochs = range(1, len(history["train_losses"]) + 1)
+    fig, (ax_loss, ax_f1) = plt.subplots(1, 2, figsize=(13, 4.5))
+    for run_seed, h in histories.items():
+        epochs = range(1, len(h["val_losses"]) + 1)
+        ax_loss.plot(epochs, h["val_losses"], alpha=0.55, label=f"seed {run_seed}")
+        ax_f1.plot(epochs, h["val_macro_f1s"], alpha=0.55, label=f"seed {run_seed}")
 
-    fig, (ax_loss, ax_acc) = plt.subplots(1, 2, figsize=(12, 4))
-    ax_loss.plot(epochs, history["train_losses"], label="train")
-    ax_loss.plot(epochs, history["val_losses"],     label="val")
+    # Cross-seed mean (only if every run trained the same number of epochs)
+    lengths = {len(h["val_macro_f1s"]) for h in histories.values()}
+    if len(lengths) == 1:
+        epochs = range(1, next(iter(lengths)) + 1)
+        mean_loss = np.mean([h["val_losses"] for h in histories.values()], axis=0)
+        mean_f1   = np.mean([h["val_macro_f1s"] for h in histories.values()], axis=0)
+        ax_loss.plot(epochs, mean_loss, "k-", linewidth=2, label="mean")
+        ax_f1.plot(epochs, mean_f1, "k-", linewidth=2, label="mean")
+
     ax_loss.set_xlabel("epoch"); ax_loss.set_ylabel("cross-entropy")
-    ax_loss.set_title("Loss"); ax_loss.legend(); ax_loss.grid(alpha=0.3)
-
-    ax_acc.plot(epochs, history["val_accuracies"], label="accuracy")
-    ax_acc.plot(epochs, history["val_precisions"], label="precision (macro)")
-    ax_acc.plot(epochs, history["val_recalls"],    label="recall (macro)")
-    ax_acc.plot(epochs, history["val_macro_f1s"],  label="F1 (macro)")
-    ax_acc.plot(epochs, history["val_aucs"],       label="ROC-AUC (macro)")
-    ax_acc.set_xlabel("epoch"); ax_acc.set_ylabel("score")
-    ax_acc.set_title("Validation metrics"); ax_acc.legend(fontsize=8); ax_acc.grid(alpha=0.3)
-
+    ax_loss.set_title("Val loss per seed"); ax_loss.legend(fontsize=7); ax_loss.grid(alpha=0.3)
+    ax_f1.set_xlabel("epoch"); ax_f1.set_ylabel("macro F1")
+    ax_f1.set_title("Val macro-F1 per seed"); ax_f1.legend(fontsize=7); ax_f1.grid(alpha=0.3)
     fig.tight_layout()
     maybe_show(fig)
 
-    # Final breakdown on the last epoch's predictions
-    print("Final validation breakdown (last epoch):")
-    print(f"  accuracy         : {history['val_accuracies'][-1]:.4f}")
-    print(f"  precision (macro): {history['val_precisions'][-1]:.4f}")
-    print(f"  recall    (macro): {history['val_recalls'][-1]:.4f}")
-    print(f"  F1        (macro): {history['val_macro_f1s'][-1]:.4f}")
-    print(f"  ROC-AUC   (macro): {history['val_aucs'][-1]:.4f}")
-    print(f"\nConfusion matrix (last epoch):\n{history['val_conf_matrices'][-1]}")
+    # Final breakdown on each run's last epoch
+    print("Final validation breakdown per seed (last epoch):")
+    for run_seed, h in histories.items():
+        print(f"  seed {run_seed}: acc {h['val_accuracies'][-1]:.4f} | "
+              f"P {h['val_precisions'][-1]:.4f} | R {h['val_recalls'][-1]:.4f} | "
+              f"F1 {h['val_macro_f1s'][-1]:.4f} | AUC {h['val_aucs'][-1]:.4f}")
+    for key, label in [
+        ("val_accuracies", "accuracy"),
+        ("val_precisions", "precision (macro)"),
+        ("val_recalls", "recall (macro)"),
+        ("val_macro_f1s", "F1 (macro)"),
+        ("val_aucs", "ROC-AUC (macro)"),
+    ]:
+        finals = [h[key][-1] for h in histories.values()]
+        print(f"  {label:17s}: mean {np.mean(finals):.4f} ± {np.std(finals):.4f} "
+              f"(min {min(finals):.4f}, max {max(finals):.4f})")
 else:
     print("[curves] no training history in this session (smoke run?) — skipping plots")

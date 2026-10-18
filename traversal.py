@@ -5,9 +5,10 @@
 #   - 1 logit  (legacy binary): sigmoid; G = ∇_z logit; direction ±1 decides
 #     which class to move toward (identical math to the original playground
 #     traversal implementation).
-#   - K logits (softmax):       pred = argmax; score toward class t from
-#     current class c is logit_t − logit_c. With target=None ("auto"), t is
-#     the second-best class (the most competitive competitor).
+#   - K logits (softmax):       pred = argmax; score toward class t from a
+#     fixed source class c is logit_t − logit_c (c = initial prediction by
+#     default). The walk's goal is the decision boundary: |P(source) −
+#     P(target)| ≤ epsilon, with overstepped steps retried at a smaller lr.
 #
 # All functions take models explicitly; nothing here is tied to a dataset.
 
@@ -72,6 +73,18 @@ def score(logits: torch.Tensor, pred_idx: int, target_idx: int) -> torch.Tensor:
     return logits.view(-1)[target_idx] - logits.view(-1)[pred_idx]
 
 
+def _prob_of(probs: torch.Tensor, class_idx: int) -> float:
+    """
+    P(class_idx) from predict()'s probs: the softmax vector (K,) for
+    multiclass models, or the single sigmoid value (shape (1,)) for 1-logit
+    binary models (where P(1) = σ(logit), P(0) = 1 − σ(logit)).
+    """
+    if probs.numel() == 1:
+        p1 = float(probs.view(-1)[0])
+        return p1 if class_idx == 1 else 1.0 - p1
+    return float(probs.view(-1)[class_idx])
+
+
 # %%
 def classifier_grad(
     z: torch.Tensor,
@@ -126,6 +139,7 @@ def take_latent_step(
     optimizer: torch.optim.Optimizer,
     orthogonal: bool = False,
     target_class: int = None,
+    source_class: int = None,
 ):
     """
     Takes a single optimization step in the latent space using the provided
@@ -136,7 +150,10 @@ def take_latent_step(
     is +1.0 to move toward class 1 / MEL, -1.0 toward class 0 / NV).
 
     K-logit classifier: loss = -direction * (logit_t − logit_c), where
-    c = argmax and t = target_class (or the second-best class when None).
+    t = target_class (or the second-best class when None) and c is the FIXED
+    source class (source_class, or the current argmax when None — the legacy
+    behaviour). Fixing c makes the walk head straight for the source/target
+    decision boundary even after the prediction flips mid-walk.
 
     orthogonal=True: before applying the step, the score gradient is
     orthogonally projected relative to V = d(err)/dz, where
@@ -152,7 +169,8 @@ def take_latent_step(
         logits = logits.view(-1)
         pred_idx = int(logits.argmax().item())
         target_idx = resolve_target(logits, pred_idx, target_class)
-        loss = -direction * (logits[target_idx] - logits[pred_idx])
+        c_idx = pred_idx if source_class is None else int(source_class)
+        loss = -direction * (logits[target_idx] - logits[c_idx])
 
     loss.backward()
 
@@ -221,26 +239,38 @@ def extrapolate_image(
     optimizer_cls=torch.optim.Adam,
     optimizer_kwargs=None,
     orthogonal: bool = True,
-    target_prob: float = 0.75,
+    source="auto",
     target="auto",
+    epsilon: float = 0.01,
+    lr_shrink: float = 0.5,
+    max_lr_retries: int = 8,
+    min_lr: float = 1e-5,
     step_sizes_out: list = None,
+    final_z_out: list = None,
 ):
     """
-    Traverse the latent space by optimizing the latent vector z to move the
-    classifier's prediction toward the target class.
+    Walk the latent space from the image's encoding toward the decision
+    boundary between a FIXED source and target class.
 
-    The gradient is recomputed at every step so the direction tracks the local
-    manifold geometry. orthogonal=True projects each score gradient orthogonal
-    to V = d(err)/dz (err = recon loop loss) to preserve reconstruction
-    fidelity; orthogonal=False walks the raw score gradient ("vanilla").
+    Goal: |P(source) − P(target)| ≤ epsilon (equal probability mass). Each
+    step optimises z to increase the score logit_t − logit_s for K-logit
+    classifiers (±logit for the 1-logit legacy binary path, direction chosen
+    to move toward the target). If a step OVERSHOOTS — the margin
+    P(source) − P(target) crosses below −epsilon — the step is undone and
+    retried with the learning rate multiplied by `lr_shrink`, up to
+    `max_lr_retries` shrinks; if it still overshoots, the last
+    non-overshooting point is kept and the walk stops.
 
-    target="auto" (default): the second-best class w.r.t. the initial
-    prediction — for 1-logit binary classifiers this is exactly the legacy
-    behavior (step along the logit for NV, against it for MEL). An explicit
-    class index targets that class instead.
+    source="auto"/None → the initial (reconstructed-image) prediction; an
+    explicit index fixes the pair. target as before ("auto" = second-best,
+    explicit index to pin it). With an explicit source AND target the score
+    is pinned to that pair throughout, so the walk tracks the same boundary
+    even after the prediction flips.
 
-    step_sizes_out: optional list; when given, the L2 norm of each actual
-    update ‖z_{t+1} − z_t‖ is appended to it (one entry per step taken).
+    step_sizes_out: optional list; when given, the L2 norm of each ACCEPTED
+    update ‖z_{t+1} − z_t‖ is appended (one entry per accepted step).
+    final_z_out: optional list; when given, the final latent is appended
+    (e.g. to compare boundary embeddings across models).
 
     Returns (traversal_images, traversal_probs, traversal_recon_errors,
     traversal_grad_norms, traversal_pred_idxs, target_idx) where
@@ -259,11 +289,14 @@ def extrapolate_image(
         z_initial = ae_model.encoder(img_tensor)
 
     # ── Initial prediction info ───────────────────────────────────────────────
-    G0, probs_initial, pred_initial_idx, target_idx = classifier_grad(
+    G0, probs_initial, pred_initial_idx, _ = classifier_grad(
         z_initial, classifier_model, ae_model, target
     )
     grad_norm_initial = G0.norm().item()
     is_binary_logit = probs_initial.numel() == 1
+    source_idx = pred_initial_idx if source in (None, "auto") else int(source)
+    target_idx = resolve_target(probs_initial, pred_initial_idx, target)
+    margin_initial = _prob_of(probs_initial, source_idx) - _prob_of(probs_initial, target_idx)
 
     with torch.no_grad():
         _, orig_probs, orig_pred_idx = predict(classifier_model, img_tensor)
@@ -274,7 +307,8 @@ def extrapolate_image(
     print(f"{tag} Original Image Pred   : {class_names[orig_pred_idx]} (Correct: {orig_pred_idx == actual_idx})")
     print(f"{tag} Reconstructed Img Pred: {class_names[pred_initial_idx]} (Correct: {pred_initial_idx == actual_idx})")
     print(f"{tag} Initial probs (recon) : {_fmt_probs(probs_initial)}")
-    print(f"{tag} Traversing toward     : {class_names[target_idx]}")
+    print(f"{tag} Boundary pair         : source={class_names[source_idx]} → "
+          f"target={class_names[target_idx]} | margin {margin_initial:+.4f} (goal |margin| ≤ {epsilon:g})")
 
     # Direction: for 1-logit classifiers ±1 on the logit (legacy); for K-logit
     # classifiers the score is already oriented toward the target.
@@ -283,68 +317,86 @@ def extrapolate_image(
         print(f"{tag} Stepping {'ALONG' if direction > 0 else 'AGAINST'} the logit gradient.")
     else:
         direction = 1.0
-        print(f"{tag} Stepping +1 along the score gradient (logit_t − logit_c).")
+        print(f"{tag} Stepping +1 along the score gradient (logit_t − logit_s).")
 
     # ── Traverse ──────────────────────────────────────────────────────────────
     with torch.no_grad():
         x_recon_0 = ae_model.decoder(z_initial)
 
     traversal_images       = [x_recon_0.cpu().squeeze(0)]
-    traversal_probs        = [probs_initial[target_idx].item()]
+    traversal_probs        = [_prob_of(probs_initial, target_idx)]
     traversal_recon_errors = [recon_error(ae_model, x_recon_0, recon_loss_fn)]
     traversal_grad_norms   = [grad_norm_initial]
     traversal_pred_idxs    = [pred_initial_idx]
+
+    if abs(margin_initial) <= epsilon:
+        print(f"{tag} Already within epsilon at the start — not traversing.")
+        if final_z_out is not None:
+            final_z_out.append(z_initial.detach().clone())
+        return (traversal_images, traversal_probs, traversal_recon_errors,
+                traversal_grad_norms, traversal_pred_idxs, target_idx)
 
     current_z = z_initial.detach().clone()
     current_z.requires_grad = True
 
     optimizer = optimizer_cls([current_z], **optimizer_kwargs)
+    margin = margin_initial
 
     for i in range(1, steps + 1):
         z_before = current_z.detach().clone()
-        take_latent_step(
-            current_z,
-            classifier_model,
-            ae_model,
-            recon_loss_fn,
-            direction,
-            optimizer,
-            orthogonal,
-            target_class=target_idx,
-        )
+
+        # ── One step, retried at a smaller lr whenever it overshoots ─────────
+        for _ in range(max_lr_retries + 1):
+            take_latent_step(
+                current_z,
+                classifier_model,
+                ae_model,
+                recon_loss_fn,
+                direction,
+                optimizer,
+                orthogonal,
+                target_class=target_idx,
+                source_class=source_idx,
+            )
+            with torch.no_grad():
+                x_recon_step = ae_model.decoder(current_z)
+                _, probs_step, pred_step_idx = predict(classifier_model, x_recon_step)
+            margin = _prob_of(probs_step, source_idx) - _prob_of(probs_step, target_idx)
+            if margin >= -epsilon:
+                break  # accepted — either still on the source side or within epsilon
+            # Overstepped: undo the step, forget its optimizer moments, shrink lr.
+            with torch.no_grad():
+                current_z.copy_(z_before)
+            if current_z in optimizer.state:
+                del optimizer.state[current_z]
+            optimizer.param_groups[0]["lr"] *= lr_shrink
+        else:
+            print(f"{tag} Step {i}: overshoot unresolvable even at lr "
+                  f"{optimizer.param_groups[0]['lr']:.2e} — keeping last point.")
+            break
+
         if step_sizes_out is not None:
             step_sizes_out.append((current_z.detach() - z_before).norm().item())
 
         grad_norm_step = current_z.grad.norm().item() if current_z.grad is not None else 0.0
-
         with torch.no_grad():
-            x_recon_step = ae_model.decoder(current_z)
-            _, probs_step, pred_step_idx = predict(classifier_model, x_recon_step)
             err_step = recon_error(ae_model, x_recon_step, recon_loss_fn)
 
         traversal_images.append(x_recon_step.cpu().squeeze(0))
-        traversal_probs.append(probs_step[target_idx].item())
+        traversal_probs.append(_prob_of(probs_step, target_idx))
         traversal_recon_errors.append(err_step)
         traversal_grad_norms.append(grad_norm_step)
         traversal_pred_idxs.append(pred_step_idx)
 
-        # Stop when the prediction has moved far enough past the boundary:
-        # 1-logit: P(target) past the legacy flip-threshold logic.
-        # K-logit: predicted class is the target AND P(target) >= target_prob.
-        if is_binary_logit:
-            p_target = probs_step[target_idx].item()
-            flip_threshold = target_prob if pred_initial_idx == 0 else 1.0 - target_prob
-            flipped = (pred_initial_idx == 0 and p_target >= flip_threshold) or \
-                      (pred_initial_idx == 1 and p_target <= flip_threshold)
-        else:
-            flipped = (pred_step_idx == target_idx
-                       and probs_step[target_idx].item() >= target_prob)
-
-        if flipped:
-            print(f"{tag} Target prob reached at step {i}! "
-                  f"p({class_names[target_idx]})={probs_step[target_idx].item():.4f}  "
-                  f"recon_err={err_step:.4f}  |G|={grad_norm_step:.4f}")
+        if abs(margin) <= epsilon:
+            print(f"{tag} Equal probs reached at step {i}! "
+                  f"p(source)={_prob_of(probs_step, source_idx):.4f}  "
+                  f"p(target)={_prob_of(probs_step, target_idx):.4f}  "
+                  f"margin={margin:+.4f}  recon_err={err_step:.4f}  |G|={grad_norm_step:.4f}")
             break
+
+    if final_z_out is not None:
+        final_z_out.append(current_z.detach().clone())
 
     return (traversal_images, traversal_probs, traversal_recon_errors,
             traversal_grad_norms, traversal_pred_idxs, target_idx)
@@ -360,8 +412,12 @@ def extrapolate_pixels(
     steps: int = 30,
     optimizer_cls=torch.optim.Adam,
     optimizer_kwargs=None,
-    target_prob: float = 0.75,
+    source="auto",
     target="auto",
+    epsilon: float = 0.01,
+    lr_shrink: float = 0.5,
+    max_lr_retries: int = 8,
+    min_lr: float = 1e-5,
     mean=IMAGENET_MEAN,
     std=IMAGENET_STD,
 ):
@@ -371,9 +427,12 @@ def extrapolate_pixels(
     back onto the valid image range after every step — the same recipe as
     `temp/pixel_attack.py` (Adam, clamp in normalised space).
 
-    Scoring/stop logic mirrors extrapolate_image: multiclass score is
-    logit_t − logit_c, stop when the prediction is the target and
-    P(target) >= target_prob (legacy binary flip logic for 1-logit models).
+    Same goal and overshoot handling as extrapolate_image: walk toward the
+    FIXED source/target boundary and stop when |P(source) − P(target)| ≤
+    epsilon; an overstepped step is undone and retried with lr × lr_shrink
+    (up to max_lr_retries shrinks, floored at min_lr). Legacy binary flip
+    logic is replaced by the same equal-probs criterion (boundary at
+    P = 0.5 for 1-logit models).
 
     Returns (traversal_images, traversal_probs, None, None, traversal_pred_idxs,
     target_idx) — recon errors / grad norms are not applicable in pixel space.
@@ -393,8 +452,10 @@ def extrapolate_pixels(
 
     with torch.no_grad():
         logits_initial, probs_initial, pred_initial_idx = predict(classifier_model, x)
+    source_idx = pred_initial_idx if source in (None, "auto") else int(source)
     target_idx = resolve_target(logits_initial, pred_initial_idx, target)
     is_binary_logit = probs_initial.numel() == 1
+    margin_initial = _prob_of(probs_initial, source_idx) - _prob_of(probs_initial, target_idx)
 
     def _fmt_probs(p):
         return "[" + ", ".join(f"{v:.2f}" for v in p.view(-1).tolist()) + "]"
@@ -402,62 +463,72 @@ def extrapolate_pixels(
     print(f"{tag} Original Image Pred   : {class_names[pred_initial_idx]} "
           f"(Correct: {pred_initial_idx == actual_idx})")
     print(f"{tag} Initial probs         : {_fmt_probs(probs_initial)}")
-    print(f"{tag} Traversing toward     : {class_names[target_idx]}")
+    print(f"{tag} Boundary pair         : source={class_names[source_idx]} → "
+          f"target={class_names[target_idx]} | margin {margin_initial:+.4f} (goal |margin| ≤ {epsilon:g})")
 
     if is_binary_logit:
         direction = 1.0 if target_idx == 1 else -1.0
         print(f"{tag} Stepping {'ALONG' if direction > 0 else 'AGAINST'} the logit gradient.")
     else:
         direction = 1.0
-        print(f"{tag} Stepping +1 along the score gradient (logit_t − logit_c).")
+        print(f"{tag} Stepping +1 along the score gradient (logit_t − logit_s).")
 
     traversal_images = [x.detach().cpu().squeeze(0)]
-    traversal_probs  = [probs_initial[target_idx].item()]
+    traversal_probs  = [_prob_of(probs_initial, target_idx)]
     traversal_pred_idxs = [pred_initial_idx]
+
+    if abs(margin_initial) <= epsilon:
+        print(f"{tag} Already within epsilon at the start — not traversing.")
+        return (traversal_images, traversal_probs, None, None,
+                traversal_pred_idxs, target_idx)
 
     x.requires_grad_(True)
     optimizer = optimizer_cls([x], **optimizer_kwargs)
+    margin = margin_initial
 
     for i in range(1, steps + 1):
-        optimizer.zero_grad()
-        logits = classifier_model(x)
-
-        if logits.shape[-1] == 1:
-            loss = -direction * logits.view(-1)[0]
-        else:
-            logits = logits.view(-1)
-            pred_idx = int(logits.argmax().item())
-            target_idx = resolve_target(logits, pred_idx, target_idx)
-            loss = -direction * (logits[target_idx] - logits[pred_idx])
-
-        loss.backward()
-
         x_before = x.detach().clone()
-        optimizer.step()
-        with torch.no_grad():
-            x.clamp_(lo, hi)   # project onto the valid image range
 
-        with torch.no_grad():
-            _, probs_step, pred_step_idx = predict(classifier_model, x)
+        # ── One step, retried at a smaller lr whenever it overshoots ─────────
+        for _ in range(max_lr_retries + 1):
+            optimizer.zero_grad()
+            logits = classifier_model(x)
+
+            if logits.shape[-1] == 1:
+                loss = -direction * logits.view(-1)[0]
+            else:
+                logits = logits.view(-1)
+                loss = -direction * (logits[target_idx] - logits[source_idx])
+
+            loss.backward()
+            optimizer.step()
+            with torch.no_grad():
+                x.clamp_(lo, hi)   # project onto the valid image range
+                _, probs_step, pred_step_idx = predict(classifier_model, x)
+            margin = _prob_of(probs_step, source_idx) - _prob_of(probs_step, target_idx)
+            if margin >= -epsilon:
+                break  # accepted
+            # Overstepped: undo, forget the rejected step's moments, shrink lr.
+            with torch.no_grad():
+                x.copy_(x_before)
+            if x in optimizer.state:
+                del optimizer.state[x]
+            optimizer.param_groups[0]["lr"] *= lr_shrink
+        else:
+            print(f"{tag} Step {i}: overshoot unresolvable even at lr "
+                  f"{optimizer.param_groups[0]['lr']:.2e} — keeping last point.")
+            break
 
         traversal_images.append(x.detach().cpu().squeeze(0))
-        traversal_probs.append(probs_step[target_idx].item())
+        traversal_probs.append(_prob_of(probs_step, target_idx))
         traversal_pred_idxs.append(pred_step_idx)
 
-        if is_binary_logit:
-            p_target = probs_step[target_idx].item()
-            flip_threshold = target_prob if pred_initial_idx == 0 else 1.0 - target_prob
-            flipped = (pred_initial_idx == 0 and p_target >= flip_threshold) or \
-                      (pred_initial_idx == 1 and p_target <= flip_threshold)
-        else:
-            flipped = (pred_step_idx == target_idx
-                       and probs_step[target_idx].item() >= target_prob)
-
-        if flipped:
+        if abs(margin) <= epsilon:
             dx = (x.detach() - x_before).norm().item()
-            print(f"{tag} Target prob reached at step {i}! "
-                  f"p({class_names[target_idx]})={probs_step[target_idx].item():.4f}  "
-                  f"‖Δx‖={dx:.4f}")
+            print(f"{tag} Equal probs reached at step {i}! "
+                  f"p(source)={_prob_of(probs_step, source_idx):.4f}  "
+                  f"p(target)={_prob_of(probs_step, target_idx):.4f}  "
+                  f"margin={margin:+.4f}  ‖Δx‖={dx:.4f}")
             break
 
     return (traversal_images, traversal_probs, None, None,
