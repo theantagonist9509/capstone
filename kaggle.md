@@ -23,7 +23,7 @@ annotated .py  ──kaggle.py (jupytext)──▶  .ipynb  ──push──▶ 
   - **Internet** enabled (the bootstrap shallow-clones this repo at run time),
   - the **`smeschke/four-shapes` dataset** attached (`dataset_sources` —
     push also sets this; its class folders live under `shapes/`, which the
-    bootstrap's walk finds and symlinks to `<clone>/dataset/shapes`),
+    bootstrap's walk finds and copies into `<clone>/dataset/shapes`),
   - a **package-manager attachment** providing `pytorch-msssim`,
   - **2× T4 GPUs** — the run scripts auto-wrap the model in `nn.DataParallel`
     and scale `BATCH_SIZE` by `torch.cuda.device_count()`; checkpoints are
@@ -103,8 +103,10 @@ run on Kaggle.
 - finds the attached dataset by walking `/kaggle/input` for its class folders
   (the mount path is nested as
   `/kaggle/input/datasets/<owner>/<slug>/…` and has changed before — the walk
-  makes the bootstrap layout-agnostic) and symlinks it to
-  `<clone>/dataset/<name>`,
+  makes the bootstrap layout-agnostic) and copies it to
+  `<clone>/dataset/<name>` (skipped when the destination already exists —
+  reading through the `/kaggle/input` mount is slow; `/kaggle/working`
+  persists between kernel runs),
 - `sys.path.insert(0, ROOT)`, re-points `__file__` into the clone (so the
   scripts' `dirname(__file__)`-based repo-root math works unchanged), and
   sanitises `sys.argv` for `argparse`,

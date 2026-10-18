@@ -1,8 +1,9 @@
 # %% [markdown]
 # # Shapes (4-class) — ConvVAE training
 #
-# Trains the tiny ConvVAE (`models.ConvVAE`) on the 4-shapes dataset. Same
-# trunk/decoder geometry as ConvAutoencoder (latent (B, 512, 2, 2)), but the
+# Trains the tiny ConvVAE (`models.ConvVAE`) on the 4-shapes dataset. The
+# trunk keeps both bottleneck stages (7 → 4 → 2), latent (B, 512, 2, 2), but
+# the
 # latent is a diagonal Gaussian q(z|x) = N(mu, exp(logvar)) sampled via the
 # reparameterisation trick. No labels are used.
 #

@@ -5,8 +5,8 @@ and optionally push it to the kernel.
 
 Cell splitting is done by **jupytext** (the scripts' `# %%` markers are its
 light format); this script only prepends a markdown header and a bootstrap
-cell that prepares the Kaggle environment (clones the repo, symlinks the
-dataset, fixes ``__file__`` / ``sys.argv``, enables inline plots). The
+cell that prepares the Kaggle environment (clones the repo, copies the
+dataset into the clone, fixes ``__file__`` / ``sys.argv``, enables inline plots). The
 resulting .ipynb can be uploaded manually in the Kaggle GUI or pushed with
 ``--push-run`` / ``--push-no-run`` — the full procedure lives in ``kaggle.md``.
 
@@ -87,11 +87,16 @@ if _ds_src is None:
     raise SystemExit("[bootstrap] dataset class folders not found under /kaggle/input")
 _ds_dst = os.path.join(ROOT, "dataset", "{next(iter(DATASET_CLASS_DIRS))}")
 os.makedirs(os.path.dirname(_ds_dst), exist_ok=True)
-if os.path.islink(_ds_dst):  # refresh a symlink persisted from an earlier run
+if os.path.islink(_ds_dst):
+    # stale symlink from the old mount-through setup — replace with a real copy
     os.unlink(_ds_dst)
-if not os.path.exists(_ds_dst):
-    os.symlink(_ds_src, _ds_dst)
-print(f"[bootstrap] dataset: {{_ds_src}} -> {{_ds_dst}}")
+if os.path.exists(_ds_dst):
+    print(f"[bootstrap] dataset already present — skipping copy: {{_ds_dst}}")
+else:
+    # Reading through the /kaggle/input mount is slow — copy once into the
+    # working clone (/kaggle/working persists between kernel runs).
+    shutil.copytree(_ds_src, _ds_dst)
+    print(f"[bootstrap] dataset copied: {{_ds_src}} -> {{_ds_dst}}")
 
 sys.path.insert(0, ROOT)
 # Re-point __file__ so the script's repo-root math resolves inside the clone,
