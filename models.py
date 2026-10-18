@@ -249,6 +249,89 @@ class ConvAutoencoder(nn.Module):
         return self.decoder(self.encoder(x))
 
 # %%
+# ── Model – Tiny Conv VAE (AE experiment: smoother latent manifold) ─────────
+#
+# Same trunk/decoder geometry as ConvAutoencoder — latent (B, 16b, 2, 2) for
+# 224×224 — but the trunk output is projected by two 1×1 conv heads into a
+# diagonal Gaussian q(z|x) = N(mu, exp(logvar)); z is drawn with the
+# reparameterisation trick. The KL term pulls q toward N(0, I), which is the
+# mechanism meant to smooth the latent space for traversal.
+#
+# NOTE: there is intentionally NO `.encoder` attribute — a naive swap of this
+# model into traversal code (which calls `.encoder(img)`) must fail loudly,
+# not silently feed trunk features where a latent is expected. Use
+# `.encode(x) -> (mu, logvar)`; `.decoder(z)` / `.decode(z)` take a latent
+# tensor directly, so traversal can later decode `mu` for deterministic
+# output. In eval() mode forward() returns decode(mu) (no sampling).
+
+class ConvVAE(nn.Module):
+    def __init__(self, in_channels=3, base_channels=32, image_size=224):
+        super().__init__()
+        assert image_size % 32 == 0, "image_size must be divisible by 32"
+
+        channels = [base_channels * (2 ** i) for i in range(5)]  # b..16b, /32 total
+        grid_hw = image_size // 32          # 224 → 7 (decoder grid)
+        latent_hw = grid_hw
+        for _ in range(2):                  # two extra k3/s2/p1 stages: 7 → 4 → 2
+            latent_hw = (latent_hw - 1) // 2 + 1
+
+        trunk = [
+            nn.Conv2d(in_channels, channels[0], kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(channels[0]),
+            nn.ReLU(inplace=True),
+        ]
+        for i in range(4):
+            trunk += [
+                nn.Conv2d(channels[i], channels[i + 1], kernel_size=3, stride=2, padding=1, bias=False),
+                nn.BatchNorm2d(channels[i + 1]),
+                nn.ReLU(inplace=True),
+            ]
+        for _ in range(2):
+            trunk += [
+                nn.Conv2d(channels[4], channels[4], kernel_size=3, stride=2, padding=1, bias=False),
+                nn.BatchNorm2d(channels[4]),
+                nn.ReLU(inplace=True),
+            ]
+        self.trunk = nn.Sequential(*trunk)
+        # trunk output: (B, 16 * base_channels, latent_hw, latent_hw) → 2×2
+
+        self.mu_head     = nn.Conv2d(channels[4], channels[4], kernel_size=1)
+        self.logvar_head = nn.Conv2d(channels[4], channels[4], kernel_size=1)
+
+        dec = [
+            nn.Upsample(size=(grid_hw, grid_hw), mode="bilinear", align_corners=False),
+        ]
+        for i in range(4, 0, -1):
+            dec += [
+                nn.ConvTranspose2d(channels[i], channels[i - 1], kernel_size=4, stride=2, padding=1),
+                nn.BatchNorm2d(channels[i - 1]),
+                nn.ReLU(inplace=True),
+            ]
+        dec += [
+            nn.ConvTranspose2d(channels[0], in_channels, kernel_size=4, stride=2, padding=1),
+        ]
+        self.decoder = nn.Sequential(*dec)
+
+    def encode(self, x):
+        f = self.trunk(x)
+        return self.mu_head(f), self.logvar_head(f).clamp(-30.0, 20.0)
+
+    def reparameterize(self, mu, logvar):
+        if self.training:
+            std = torch.exp(0.5 * logvar)
+            eps = torch.randn_like(std)
+            return mu + eps * std
+        return mu  # deterministic at inference — the mean of q(z|x)
+
+    def decode(self, z):
+        return self.decoder(z)
+
+    def forward(self, x):
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        return self.decoder(z), mu, logvar
+
+# %%
 # ── Model – EfficientNet-B0 VAE ───────────────────────────────────────────────
 #
 # Encoder: EfficientNet-B0 backbone.features → (B, 1280, 7, 7)

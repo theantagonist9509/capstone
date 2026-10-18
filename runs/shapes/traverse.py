@@ -15,11 +15,13 @@
 # sizes ‖Δz‖ for vanilla vs orthogonal (does the constraint shrink steps?).
 #
 # **Usage**
-# - locally: `python runs/shapes/traverse.py [--smoke]`
+# - locally: `python runs/shapes/traverse.py [--smoke] [--arch conv_vae]`
 # - Kaggle:  `python kaggle.py runs/shapes/traverse.py` then
 #   upload/push to the `btp-26` kernel (see `kaggle.md`)
 #
-# Requires trained checkpoints in `checkpoints/shapes/{conv_classifier,conv_ae}`.
+# Requires trained checkpoints in `checkpoints/shapes/{conv_classifier,conv_ae}`
+# (or `conv_classifier,conv_vae` with `--arch conv_vae`). The VAE is traversed
+# in mu-space (posterior mean) via a small adapter — see `VAEAsAE` below.
 
 # %%
 import argparse
@@ -37,7 +39,7 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from custom_datasets import FolderDataset
-from models import ConvAutoencoder, ConvClassifier
+from models import ConvAutoencoder, ConvClassifier, ConvVAE
 from traversal import (
     extrapolate_image,
     extrapolate_pixels,
@@ -57,6 +59,7 @@ from utils import load_best_model, maybe_show, print_checkpoint_info
 DATASET_DIR          = os.path.join(_repo_root, "dataset", "shapes")
 CLS_CHECKPOINT_DIR   = os.path.join(_repo_root, "checkpoints", "shapes", "conv_classifier")
 AE_CHECKPOINT_DIR    = os.path.join(_repo_root, "checkpoints", "shapes", "conv_ae")
+VAE_CHECKPOINT_DIR   = os.path.join(_repo_root, "checkpoints", "shapes", "conv_vae")
 OUT_DIR              = os.path.join(_repo_root, "runs", "shapes", "out")
 
 IMAGE_SIZE           = 224
@@ -82,6 +85,28 @@ val_transform = transforms.Compose([
 # ## Helpers
 
 # %%
+class VAEAsAE(nn.Module):
+    """
+    Adapt a ConvVAE to the encoder/decoder interface traversal.py expects.
+
+    encoder(x) returns the posterior mean mu — the deterministic latent
+    point (eval-mode equivalent of sampling) — so every latent-space
+    operation (steps, PCA bases, recon loop) acts in mu-space; decoder is
+    the VAE's own pixel decoder (so `.parameters()` keeps working).
+    ConvVAE deliberately has no `.encoder` attribute (see models.py) —
+    this adapter is the only sanctioned bridge.
+    """
+
+    def __init__(self, vae):
+        super().__init__()
+        self._vae    = vae
+        self.decoder = vae.decoder
+
+    def encoder(self, x):
+        mu, _ = self._vae.encode(x)
+        return mu
+
+
 def build_val_split():
     base = FolderDataset(root_dir=DATASET_DIR, transform=val_transform)
     n_total = len(base)
@@ -151,17 +176,27 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--smoke", action="store_true",
                         help="1 image, 2 steps, random-init models, no checkpoints")
+    parser.add_argument("--arch", choices=["conv_ae", "conv_vae"], default="conv_ae",
+                        help="which shape latent model to traverse "
+                             "(conv_vae acts in mu-space; default: conv_ae)")
     args = parser.parse_args()
 
     class_names, val_sub = build_val_split()
     print(f"Val split size: {len(val_sub)} | classes: {class_names}")
+    print(f"Traversing arch: {args.arch}"
+          + (" (VAE latent = mu, posterior mean)" if args.arch == "conv_vae" else ""))
 
     classifier_model = ConvClassifier(
         num_classes=len(class_names), base_channels=BASE_CHANNELS, image_size=IMAGE_SIZE
     ).to(DEVICE)
-    ae_model = ConvAutoencoder(
-        base_channels=BASE_CHANNELS, image_size=IMAGE_SIZE
-    ).to(DEVICE)
+    if args.arch == "conv_vae":
+        raw_ae = ConvVAE(base_channels=BASE_CHANNELS, image_size=IMAGE_SIZE).to(DEVICE)
+        ae_model = VAEAsAE(raw_ae)
+    else:
+        raw_ae = ConvAutoencoder(
+            base_channels=BASE_CHANNELS, image_size=IMAGE_SIZE
+        ).to(DEVICE)
+        ae_model = raw_ae
 
     # Reconstruction-loop criterion — must match how the AE was trained
     # (default mse; see runs/shapes/train_ae.py).
@@ -215,12 +250,19 @@ def main():
     print("Classifier checkpoint info:")
     print_checkpoint_info(cls_ckpt)
 
-    ae_ckpt = load_best_model(
-        ae_model, AE_CHECKPOINT_DIR,
-        index_selector=lambda ckpt: int(np.argmin(np.array(ckpt["history"]["val_losses"]))),
-        device=DEVICE,
-    )
-    print("Autoencoder checkpoint info:")
+    if args.arch == "conv_vae":
+        ae_ckpt = load_best_model(
+            raw_ae, VAE_CHECKPOINT_DIR,
+            index_selector=lambda ckpt: int(np.argmin(np.array(ckpt["history"]["val_recons"]))),
+            device=DEVICE,
+        )
+    else:
+        ae_ckpt = load_best_model(
+            raw_ae, AE_CHECKPOINT_DIR,
+            index_selector=lambda ckpt: int(np.argmin(np.array(ckpt["history"]["val_losses"]))),
+            device=DEVICE,
+        )
+    print(f"{args.arch} checkpoint info:")
     print_checkpoint_info(ae_ckpt)
 
     classifier_model.eval()
