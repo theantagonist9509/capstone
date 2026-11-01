@@ -10,6 +10,16 @@
 # original image**. Walks stop when |P(source) − P(target)| ≤ EPSILON;
 # overstepped steps are retried at a smaller lr (see traversal.py).
 #
+# **Random baselines.** For every gradient walk (latent and pixel) the script
+# also draws N random offsets (default 10) from the SAME start point, at the
+# same straight-line distance as that walk (‖z_final − z_start‖ in latent
+# space, ‖x_final − x_start‖ in normalised pixel space), in a uniform random
+# direction. Pixel offsets are clamped to the valid image range, exactly like
+# the pixel walk (so a clamped offset can be slightly shorter). Every random
+# point goes through the same stats as the gradient boundary images, averaged
+# over the N draws. These show how much of each result comes from the
+# gradient direction rather than from the distance moved.
+#
 # Per image it saves a grid of the per-classifier boundary images, and pooled
 # over all images it reports:
 # 1. **Cross-classifier transfer** — every classifier is evaluated on every
@@ -32,7 +42,8 @@
 #    control (no shared latent model).
 #
 # **Usage**
-# - locally: `python runs/shapes/traverse.py [--smoke] [--arch conv_vae] [--vanilla]`
+# - locally: `python runs/shapes/traverse.py [--smoke] [--arch conv_vae] [--orthogonal]
+#   [--n-random 10] [--random-seed 42]`
 # - Kaggle:  `python kaggle.py runs/shapes/traverse.py` then
 #   upload/push to the `btp-26` kernel (see `kaggle.md`)
 #
@@ -50,6 +61,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
+from matplotlib.patches import Patch
 from torchvision import transforms
 
 _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -82,6 +94,14 @@ DEVICE               = "cuda" if torch.cuda.is_available() else "cpu"
 
 MEAN = 0.5
 STD  = 0.5
+
+# Valid pixel range in normalised space (same as extrapolate_pixels' clamp).
+PIX_LO = (0.0 - MEAN) / STD
+PIX_HI = (1.0 - MEAN) / STD
+
+# Plot colours per method.
+C_LAT_GRAD, C_LAT_RAND = "tab:blue", "tab:cyan"
+C_PIX_GRAD, C_PIX_RAND = "tab:orange", "tab:green"
 
 val_transform = transforms.Compose([
     transforms.Resize(IMAGE_SIZE),
@@ -260,6 +280,76 @@ def cross_eval(frames_x, classifiers, src, tgt):
     return M, A
 
 
+def _batch_prob(logits, class_idx):
+    """
+    P(class_idx) for a BATCH of logits, mirroring traversal._prob_of:
+    K logits → the softmax column; 1 logit → sigmoid for class 1 and
+    1 − sigmoid for class 0.
+    """
+    if logits.shape[-1] == 1:
+        p1 = torch.sigmoid(logits.view(-1))
+        return p1 if class_idx == 1 else 1.0 - p1
+    return torch.softmax(logits, dim=-1)[:, class_idx]
+
+
+def cross_eval_batch(frames, classifiers, src, tgt):
+    """Like cross_eval, but each entry of `frames` is a batch (n,3,H,W) of
+    random draws for classifier i's walk. Each C×C entry is the mean over the
+    n draws. Returns (M, A, S): symmetric % difference, absolute margin
+    p_target − p_source, and pair mass p_source + p_target.
+    """
+    C = len(classifiers)
+    M = np.zeros((C, C))
+    A = np.zeros((C, C))
+    S = np.zeros((C, C))
+    with torch.no_grad():
+        for i in range(C):
+            for j, clf_j in enumerate(classifiers):
+                logits = clf_j(frames[i])
+                p_s = _batch_prob(logits, src)
+                p_t = _batch_prob(logits, tgt)
+                A[i, j] = float((p_t - p_s).mean())
+                M[i, j] = float((100.0 * (p_t - p_s)
+                                 / (0.5 * (p_s + p_t)).clamp_min(1e-8)).mean())
+                S[i, j] = float((p_s + p_t).mean())
+    return M, A, S
+
+
+def random_offsets(origin, dist, n, gen, lo=None, hi=None):
+    """
+    n points at straight-line distance `dist` from `origin` (shape (1, ...)),
+    each in a uniform random direction (normalised Gaussian vector). If lo/hi
+    are given the points are clamped to [lo, hi] (so they may land a little
+    closer than `dist`).
+    """
+    u = torch.randn((n,) + tuple(origin.shape[1:]), generator=gen, device=origin.device)
+    norm = u.flatten(1).norm(dim=1).clamp_min(1e-12).view(-1, *([1] * (u.dim() - 1)))
+    pts = origin + dist * u / norm
+    if lo is not None:
+        pts = pts.clamp(lo, hi)
+    return pts
+
+
+def _overlay(ax, series, bins, title, xlabel):
+    """Overlay histograms. series: [(data, label, colour or None)]."""
+    for data, label, color in series:
+        ax.hist(data, bins=bins, alpha=0.55, label=label, color=color)
+    ax.axvline(0.0, color="k", linestyle="--", linewidth=1.0)
+    ax.set_title(title, fontsize=9)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("count")
+    ax.legend(fontsize=7)
+    ax.grid(alpha=0.3)
+
+
+def _table_row(name, diag, off, off_abs, shift, S, disp):
+    return (f"{name:<16s} {diag.mean():+8.2f} ±{diag.std():6.2f} | "
+            f"{off.mean():+8.2f} ±{off.std():6.2f} | "
+            f"{(np.abs(off) <= 5).mean() * 100:4.0f}% | {off_abs.mean():+8.4f} | "
+            f"{shift.mean():+8.4f} ({(shift > 0).mean() * 100:3.0f}%) | "
+            f"{S.mean():.3f} | {disp:.4f}")
+
+
 # %% [markdown]
 # ## Ensemble boundary demo
 
@@ -271,21 +361,31 @@ def main():
     parser.add_argument("--arch", choices=["conv_ae", "conv_vae"], default="conv_ae",
                         help="which shape latent model to traverse "
                              "(conv_vae acts in mu-space; default: conv_ae)")
-    parser.add_argument("--vanilla", action="store_true",
-                        help="walk the raw score gradient instead of the "
-                             "orthogonal (paper) traversal")
+    parser.add_argument("--orthogonal", action="store_true",
+                        help="project the latent walk off the reconstruction-error "
+                             "gradient (orthogonal / paper traversal); "
+                             "default is the vanilla score-gradient walk")
     parser.add_argument("--classifier-seeds", type=int, nargs="+", default=None,
                         metavar="SEED",
                         help="restrict the ensemble to these seed_<seed> dirs "
                              "(default: every seed dir found)")
+    parser.add_argument("--n-random", type=int, default=10,
+                        help="random draws per walk for the random baselines "
+                             "(averaged; default: 10)")
+    parser.add_argument("--random-seed", type=int, default=42,
+                        help="seed for the random baselines (default: 42)")
     args = parser.parse_args()
+
+    n_rand = max(1, args.n_random)
+    gen = torch.Generator(device=DEVICE)
+    gen.manual_seed(args.random_seed)
 
     class_names, val_sub = build_val_split()
     print(f"Val split size: {len(val_sub)} | classes: {class_names}")
     print(f"Traversing arch: {args.arch}"
           + (" (VAE latent = mu, posterior mean)" if args.arch == "conv_vae" else "")
-          + f" | mode: {'vanilla' if args.vanilla else 'orthogonal'}"
-          + f" | ε = {EPSILON:g}")
+          + f" | mode: {'orthogonal' if args.orthogonal else 'vanilla'}"
+          + f" | ε = {EPSILON:g} | random baselines: {n_rand} draws, seed {args.random_seed}")
 
     # ── Latent model ──────────────────────────────────────────────────────────
     if args.arch == "conv_vae":
@@ -358,13 +458,20 @@ def main():
     else:
         chosen = select_images(val_sub, class_names, N_PER_CLASS, classifiers, DEVICE)
 
-    pools = {k: [] for k in ("lat_diag", "lat_off", "pix_diag", "pix_off",
-                             "lat_off_abs", "pix_off_abs",
-                             "lat_shift", "pix_shift", "lat_offset",
-                             "lat_S", "pix_S")}
-    first_shift = None   # (S_lat, S_pix, src, tgt, title) of the first image
-    var_rows = []   # (display_name, class_name, lat_ratio, pix_ratio,
-                    #  lat_var, lat_var_per_dim, pix_var)
+    # "r" prefix = random baseline. lat_/pix_ = gradient walks.
+    pools = {k: [] for k in (
+        "lat_diag", "lat_off", "pix_diag", "pix_off",
+        "lat_off_abs", "pix_off_abs",
+        "lat_shift", "pix_shift", "lat_offset",
+        "lat_S", "pix_S",
+        "rlat_diag", "rlat_off", "rpix_diag", "rpix_off",
+        "rlat_off_abs", "rpix_off_abs",
+        "rlat_shift", "rpix_shift",
+        "rlat_S", "rpix_S",
+        "lat_dist", "pix_dist", "rpix_keep",
+    )}
+    first_shift = None   # dict of the first image's shift matrices
+    var_rows = []        # one dict per image (dispersion results)
     n_images = 0
     for lbl_idx, label_name in enumerate(class_names):
         if not chosen[lbl_idx]:
@@ -393,7 +500,7 @@ def main():
                 results = extrapolate_image(
                     img.unsqueeze(0), lbl, clf, ae_model, rloss,
                     class_names=class_names, device=DEVICE,
-                    steps=STEPS, orthogonal=not args.vanilla,
+                    steps=STEPS, orthogonal=args.orthogonal,
                     source=src, target=tgt, epsilon=EPSILON,
                     final_z_out=final_z,
                     pair_mass_out=lat_s_hist,
@@ -449,7 +556,8 @@ def main():
             # of the reconstruction — that is the correct baseline. The pixel
             # walk starts at x itself, so its baseline is the original image.
             with torch.no_grad():
-                x_recon = ae_model.decoder(ae_model.encoder(x))
+                z0 = ae_model.encoder(x)             # latent walk start
+                x_recon = ae_model.decoder(z0)
             margins_recon = np.zeros(C)
             margins_orig = np.zeros(C)
             with torch.no_grad():
@@ -465,9 +573,50 @@ def main():
             pools["lat_shift"].extend(S_lat[off])
             pools["pix_shift"].extend(S_pix[off])
             pools["lat_offset"].extend(margins_recon - margins_orig)
+
+            # — random baselines: same start, same straight-line distance —
+            # One batch of n_rand random points per classifier walk i, at the
+            # distance walk i moved. Latent points are decoded; pixel points
+            # are clamped to the valid range like the pixel walk.
+            rnd_lat_x, rnd_lat_z, rnd_pix_x = [], [], []
+            with torch.no_grad():
+                for i in range(C):
+                    d_lat = float((lat_zs[i] - z0).norm())
+                    d_pix = float((pix_xs[i] - x).norm())
+                    pools["lat_dist"].append(d_lat)
+                    pools["pix_dist"].append(d_pix)
+
+                    zr = random_offsets(z0, d_lat, n_rand, gen)
+                    rnd_lat_z.append(zr.flatten(1))
+                    rnd_lat_x.append(ae_model.decoder(zr))
+
+                    xr = random_offsets(x, d_pix, n_rand, gen, PIX_LO, PIX_HI)
+                    rnd_pix_x.append(xr)
+                    if d_pix > 1e-12:
+                        kept = float((xr - x).flatten(1).norm(dim=1).mean()) / d_pix
+                        pools["rpix_keep"].append(kept)
+
+            M_rl, A_rl, S_rl = cross_eval_batch(rnd_lat_x, classifiers, src, tgt)
+            M_rp, A_rp, S_rp = cross_eval_batch(rnd_pix_x, classifiers, src, tgt)
+            pools["rlat_diag"].extend(np.diag(M_rl))
+            pools["rpix_diag"].extend(np.diag(M_rp))
+            pools["rlat_off"].extend(M_rl[off])
+            pools["rpix_off"].extend(M_rp[off])
+            pools["rlat_off_abs"].extend(A_rl[off])
+            pools["rpix_off_abs"].extend(A_rp[off])
+            S_rlat = A_rl - margins_recon[None, :]
+            S_rpix = A_rp - margins_orig[None, :]
+            pools["rlat_shift"].extend(S_rlat[off])
+            pools["rpix_shift"].extend(S_rpix[off])
+            pools["rlat_S"].extend(np.diag(S_rl))
+            pools["rpix_S"].extend(np.diag(S_rp))
+
             if first_shift is None:
-                first_shift = (S_lat.copy(), S_pix.copy(), src, tgt,
-                               f"{label_name}#{k+1}")
+                first_shift = {
+                    "lat": S_lat.copy(), "pix": S_pix.copy(),
+                    "rlat": S_rlat.copy(), "rpix": S_rpix.copy(),
+                    "src": src, "tgt": tgt, "name": f"{label_name}#{k+1}",
+                }
 
             print(f"  transfer off-diag Δ%: latent {M_lat[off].mean():+.2f} ± "
                   f"{M_lat[off].std():.2f} | pixels {M_pix[off].mean():+.2f} ± "
@@ -502,8 +651,22 @@ def main():
             Xp = torch.stack([t.view(-1) for t in pix_xs]).float()  # (C, 3HW)
             pix_var = float(((Xp - Xp.mean(dim=0)) ** 2).sum(dim=1).mean())
             pix_ratio = pix_var / max(pixel_ref_var, 1e-12)
-            var_rows.append((f"{label_name}#{k+1}", label_name,
-                             lat_ratio, pix_ratio, lat_var, lat_var_per_dim, pix_var))
+
+            # Random baselines: spread over classifiers within each draw,
+            # averaged over the draws.
+            Zr = torch.stack(rnd_lat_z).float()                      # (C, n, D)
+            rlat_var = float(((Zr - Zr.mean(dim=0, keepdim=True)) ** 2).sum(dim=-1).mean())
+            Xr = torch.stack([t.flatten(1) for t in rnd_pix_x]).float()  # (C, n, 3HW)
+            rpix_var = float(((Xr - Xr.mean(dim=0, keepdim=True)) ** 2).sum(dim=-1).mean())
+            rlat_ratio = rlat_var / max(latent_ref_var, 1e-12)
+            rpix_ratio = rpix_var / max(pixel_ref_var, 1e-12)
+
+            var_rows.append({
+                "name": f"{label_name}#{k+1}", "cls": label_name,
+                "lat": lat_ratio, "pix": pix_ratio,
+                "rlat": rlat_ratio, "rpix": rpix_ratio,
+                "lat_var": lat_var, "lat_pd": lat_var_per_dim, "pix_var": pix_var,
+            })
             print(f"  dispersion: latent var {lat_var:.1f} "
                   f"(per-dim {lat_var_per_dim:.4f}, ratio {lat_ratio:.4f}) | "
                   f"pixel var {pix_var:.1f} (ratio {pix_ratio:.4f})")
@@ -511,42 +674,78 @@ def main():
     if args.smoke:
         n_lat = len(pools["lat_diag"]) + len(pools["lat_off"])
         n_sh  = len(pools["lat_shift"]) + len(pools["pix_shift"])
+        n_r   = (len(pools["rlat_diag"]) + len(pools["rlat_off"])
+                 + len(pools["rpix_diag"]) + len(pools["rpix_off"]))
         print(f"\n[SMOKE] {n_images} image × {len(classifiers)} classifiers ok | "
               f"transfer entries: latent {n_lat}, pixels "
-              f"{len(pools['pix_diag']) + len(pools['pix_off'])}, shifts {n_sh}")
+              f"{len(pools['pix_diag']) + len(pools['pix_off'])}, shifts {n_sh}, "
+              f"random baselines {n_r}")
         return
+
+    # ── Random-baseline distances ─────────────────────────────────────────────
+    lat_dist = np.asarray(pools["lat_dist"], dtype=float)
+    pix_dist = np.asarray(pools["pix_dist"], dtype=float)
+    keep = np.asarray(pools["rpix_keep"], dtype=float)
+    print(f"\n[random] matched straight-line distance per walk: latent "
+          f"{lat_dist.mean():.3f} ± {lat_dist.std():.3f} | pixels "
+          f"{pix_dist.mean():.3f} ± {pix_dist.std():.3f} "
+          f"(clamping kept {keep.mean() * 100:.1f}% of the pixel offset)"
+          if keep.size else
+          f"\n[random] matched distance: latent {lat_dist.mean():.3f} | "
+          f"pixels {pix_dist.mean():.3f}")
 
     # ── Metric 1: cross-classifier transfer (Δ% and absolute margin) ──────────
     if pools["lat_off"] and pools["pix_off"]:
-        lat_off = np.asarray(pools["lat_off"], dtype=float)
-        pix_off = np.asarray(pools["pix_off"], dtype=float)
-        lat_diag = np.asarray(pools["lat_diag"], dtype=float)
-        pix_diag = np.asarray(pools["pix_diag"], dtype=float)
-        lat_off_a = np.asarray(pools["lat_off_abs"], dtype=float)
-        pix_off_a = np.asarray(pools["pix_off_abs"], dtype=float)
+        P = {k: np.asarray(v, dtype=float) for k, v in pools.items()}
+        lat_off, pix_off = P["lat_off"], P["pix_off"]
+        lat_diag, pix_diag = P["lat_diag"], P["pix_diag"]
+        lat_off_a, pix_off_a = P["lat_off_abs"], P["pix_off_abs"]
+        rlat_off, rpix_off = P["rlat_off"], P["rpix_off"]
+        rlat_diag, rpix_diag = P["rlat_diag"], P["rpix_diag"]
 
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+        # Shared bins so every panel is comparable.
         bins_pct = np.histogram_bin_edges(
-            np.concatenate([lat_diag, lat_off, pix_diag, pix_off]), bins=40
+            np.concatenate([lat_diag, lat_off, pix_diag, pix_off,
+                            rlat_diag, rlat_off, rpix_diag, rpix_off]), bins=40
         )
-        axes[0].hist(lat_diag, bins=bins_pct, alpha=0.55, label="diagonal (own walk)")
-        axes[0].hist(lat_off, bins=bins_pct, alpha=0.55, label="off-diagonal (transfer)")
-        axes[0].set_title("Latent walks — Δ%")
-        axes[1].hist(pix_diag, bins=bins_pct, alpha=0.55, label="diagonal (own walk)")
-        axes[1].hist(pix_off, bins=bins_pct, alpha=0.55, label="off-diagonal (transfer)")
-        axes[1].set_title("Pixel walks (control) — Δ%")
-        axes[2].hist(lat_off, bins=bins_pct, alpha=0.55, label="latent off-diag")
-        axes[2].hist(pix_off, bins=bins_pct, alpha=0.55, label="pixel off-diag")
-        axes[2].set_title("Off-diagonal transfer — latent vs pixels")
-        for ax in axes:
-            ax.axvline(0.0, color="k", linestyle="--", linewidth=1.0)
-            ax.set_xlabel("100 · (p_t − p_s) / mean(p_s, p_t)")
-            ax.set_ylabel("count")
-            ax.legend(fontsize=7)
-            ax.grid(alpha=0.3)
+        xl_pct = "100 · (p_t − p_s) / mean(p_s, p_t)"
+
+        fig, axes = plt.subplots(3, 3, figsize=(16, 12))
+        # Row 1: gradient walks
+        _overlay(axes[0][0], [(lat_diag, "diagonal (own walk)", None),
+                              (lat_off, "off-diagonal (transfer)", None)],
+                 bins_pct, "Latent gradient walks — Δ%", xl_pct)
+        _overlay(axes[0][1], [(pix_diag, "diagonal (own walk)", None),
+                              (pix_off, "off-diagonal (transfer)", None)],
+                 bins_pct, "Pixel gradient walks (control) — Δ%", xl_pct)
+        _overlay(axes[0][2], [(lat_off, "latent off-diag", C_LAT_GRAD),
+                              (pix_off, "pixel off-diag", C_PIX_GRAD)],
+                 bins_pct, "Gradient off-diagonal — latent vs pixels", xl_pct)
+        # Row 2: random baselines
+        _overlay(axes[1][0], [(rlat_diag, "diagonal (own walk's offset)", None),
+                              (rlat_off, "off-diagonal (transfer)", None)],
+                 bins_pct, f"Latent random offsets ({n_rand} draws) — Δ%", xl_pct)
+        _overlay(axes[1][1], [(rpix_diag, "diagonal (own walk's offset)", None),
+                              (rpix_off, "off-diagonal (transfer)", None)],
+                 bins_pct, f"Pixel random offsets ({n_rand} draws) — Δ%", xl_pct)
+        _overlay(axes[1][2], [(rlat_off, "latent random off-diag", C_LAT_RAND),
+                              (rpix_off, "pixel random off-diag", C_PIX_RAND)],
+                 bins_pct, "Random off-diagonal — latent vs pixels", xl_pct)
+        # Row 3: gradient vs random
+        _overlay(axes[2][0], [(lat_off, "gradient", C_LAT_GRAD),
+                              (rlat_off, "random", C_LAT_RAND)],
+                 bins_pct, "Latent off-diagonal — gradient vs random", xl_pct)
+        _overlay(axes[2][1], [(pix_off, "gradient", C_PIX_GRAD),
+                              (rpix_off, "random", C_PIX_RAND)],
+                 bins_pct, "Pixel off-diagonal — gradient vs random", xl_pct)
+        _overlay(axes[2][2], [(lat_off, "latent gradient", C_LAT_GRAD),
+                              (rlat_off, "latent random", C_LAT_RAND),
+                              (pix_off, "pixel gradient", C_PIX_GRAD),
+                              (rpix_off, "pixel random", C_PIX_RAND)],
+                 bins_pct, "Off-diagonal — all four", xl_pct)
         fig.suptitle(f"Boundary transfer across {len(classifiers)} classifiers "
                      f"× {n_images} images (ε = {EPSILON:g})")
-        fig.tight_layout(rect=(0, 0, 1, 0.94))
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
         path = os.path.join(OUT_DIR, "boundary_prob_balance.png")
         plt.savefig(path, bbox_inches="tight", dpi=150)
         print(f"Saved plot: {path}")
@@ -564,39 +763,63 @@ def main():
               f"(min {pix_off.min():+.2f}, max {pix_off.max():+.2f}) | "
               f"off-diag |Δ%| ≤ 5: {(np.abs(pix_off) <= 5).mean() * 100:.0f}% "
               f"(ε = {EPSILON:g})")
+        print(f"[balance] latent  RANDOM diagonal Δ%: {rlat_diag.mean():+.3f} ± "
+              f"{rlat_diag.std():.3f} | diag |Δ%| ≤ 5: "
+              f"{(np.abs(rlat_diag) <= 5).mean() * 100:.0f}% | off-diagonal: "
+              f"{rlat_off.mean():+.3f} ± {rlat_off.std():.3f} | off-diag |Δ%| ≤ 5: "
+              f"{(np.abs(rlat_off) <= 5).mean() * 100:.0f}%")
+        print(f"[balance] pixels  RANDOM diagonal Δ%: {rpix_diag.mean():+.3f} ± "
+              f"{rpix_diag.std():.3f} | diag |Δ%| ≤ 5: "
+              f"{(np.abs(rpix_diag) <= 5).mean() * 100:.0f}% | off-diagonal: "
+              f"{rpix_off.mean():+.3f} ± {rpix_off.std():.3f} | off-diag |Δ%| ≤ 5: "
+              f"{(np.abs(rpix_off) <= 5).mean() * 100:.0f}%")
         print(f"[margin] off-diagonal p_t − p_s: latent {lat_off_a.mean():+.4f} ± "
-              f"{lat_off_a.std():.4f} | pixels {pix_off_a.mean():+.4f} ± {pix_off_a.std():.4f}")
+              f"{lat_off_a.std():.4f} | pixels {pix_off_a.mean():+.4f} ± {pix_off_a.std():.4f}"
+              f" | latent random {P['rlat_off_abs'].mean():+.4f} ± "
+              f"{P['rlat_off_abs'].std():.4f} | pixels random "
+              f"{P['rpix_off_abs'].mean():+.4f} ± {P['rpix_off_abs'].std():.4f}")
 
         # — margin-shift transfer (softer criterion: shared direction?) —
-        lat_sh = np.asarray(pools["lat_shift"], dtype=float)
-        pix_sh = np.asarray(pools["pix_shift"], dtype=float)
-        fig, axes = plt.subplots(1, 4, figsize=(17, 4.2))
-        bins_sh = np.histogram_bin_edges(np.concatenate([lat_sh, pix_sh]), bins=40)
-        axes[0].hist(lat_sh, bins=bins_sh, alpha=0.8)
-        axes[0].set_title("Latent Δmargin (walk, vs recon)")
-        axes[1].hist(pix_sh, bins=bins_sh, alpha=0.8)
-        axes[1].set_title("Pixel Δmargin (walk, vs original)")
-        for ax in (axes[0], axes[1]):
-            ax.axvline(0.0, color="k", linestyle="--", linewidth=1.0)
-            ax.set_xlabel("Δmargin = margin(boundary) − margin(walk start)")
-            ax.set_ylabel("count")
-            ax.grid(alpha=0.3)
+        lat_sh, pix_sh = P["lat_shift"], P["pix_shift"]
+        rlat_sh, rpix_sh = P["rlat_shift"], P["rpix_shift"]
+        bins_sh = np.histogram_bin_edges(
+            np.concatenate([lat_sh, pix_sh, rlat_sh, rpix_sh]), bins=40
+        )
+        xl_sh = "Δmargin = margin(point) − margin(walk start)"
+        fig, axes = plt.subplots(2, 4, figsize=(18, 8.6))
+        _overlay(axes[0][0], [(lat_sh, "gradient", C_LAT_GRAD),
+                              (rlat_sh, "random", C_LAT_RAND)],
+                 bins_sh, "Latent Δmargin (vs recon) — gradient vs random", xl_sh)
+        _overlay(axes[0][1], [(pix_sh, "gradient", C_PIX_GRAD),
+                              (rpix_sh, "random", C_PIX_RAND)],
+                 bins_sh, "Pixel Δmargin (vs original) — gradient vs random", xl_sh)
+        _overlay(axes[1][0], [(lat_sh, "latent gradient", C_LAT_GRAD),
+                              (pix_sh, "pixel gradient", C_PIX_GRAD)],
+                 bins_sh, "Gradient Δmargin — latent vs pixels", xl_sh)
+        _overlay(axes[1][1], [(rlat_sh, "latent random", C_LAT_RAND),
+                              (rpix_sh, "pixel random", C_PIX_RAND)],
+                 bins_sh, "Random Δmargin — latent vs pixels", xl_sh)
         if first_shift is not None:
-            S_lat0, S_pix0, src0, tgt0, name0 = first_shift
-            vmax = max(np.abs(S_lat0).max(), np.abs(S_pix0).max(), 1e-6)
-            im0 = axes[2].imshow(S_lat0, cmap="RdBu_r", vmin=-vmax, vmax=vmax)
-            axes[2].set_title(f"Latent Δmargin matrix\n{name0} "
-                              f"({class_names[src0]}→{class_names[tgt0]})\n"
-                              f"rows=boundary of i, cols=evaluator j", fontsize=8)
-            fig.colorbar(im0, ax=axes[2], fraction=0.046, pad=0.04)
-            im1 = axes[3].imshow(S_pix0, cmap="RdBu_r", vmin=-vmax, vmax=vmax)
-            axes[3].set_title(f"Pixel Δmargin matrix\n{name0}\n"
-                              f"rows=boundary of i, cols=evaluator j", fontsize=8)
-            fig.colorbar(im1, ax=axes[3], fraction=0.046, pad=0.04)
+            fs = first_shift
+            vmax = max(np.abs(fs[m]).max() for m in ("lat", "pix", "rlat", "rpix"))
+            vmax = max(vmax, 1e-6)
+            pair = f"{class_names[fs['src']]}→{class_names[fs['tgt']]}"
+            panels = [(axes[0][2], "lat", "Latent gradient"),
+                      (axes[0][3], "pix", "Pixel gradient"),
+                      (axes[1][2], "rlat", "Latent random"),
+                      (axes[1][3], "rpix", "Pixel random")]
+            for ax, key, name in panels:
+                im = ax.imshow(fs[key], cmap="RdBu_r", vmin=-vmax, vmax=vmax)
+                ax.set_title(f"{name} Δmargin matrix\n{fs['name']} ({pair})\n"
+                             f"rows=point of i, cols=evaluator j", fontsize=8)
+                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        else:
+            for ax in (axes[0][2], axes[0][3], axes[1][2], axes[1][3]):
+                ax.axis("off")
         fig.suptitle(f"Margin-shift transfer across {len(classifiers)} classifiers "
                      f"× {n_images} images (positive = moved toward target; "
                      f"ε = {EPSILON:g})")
-        fig.tight_layout(rect=(0, 0, 1, 0.93))
+        fig.tight_layout(rect=(0, 0, 1, 0.95))
         shift_path = os.path.join(OUT_DIR, "boundary_transfer_shift.png")
         plt.savefig(shift_path, bbox_inches="tight", dpi=150)
         print(f"Saved plot: {shift_path}")
@@ -607,54 +830,94 @@ def main():
         print(f"[shift] pixels off-diag Δmargin (walk, vs original): "
               f"{pix_sh.mean():+.4f} ± {pix_sh.std():.4f} "
               f"| toward target: {(pix_sh > 0).mean() * 100:.0f}%")
-        lat_off_sh = np.asarray(pools["lat_offset"], dtype=float)
+        print(f"[shift] latent RANDOM off-diag Δmargin: "
+              f"{rlat_sh.mean():+.4f} ± {rlat_sh.std():.4f} "
+              f"| toward target: {(rlat_sh > 0).mean() * 100:.0f}%")
+        print(f"[shift] pixels RANDOM off-diag Δmargin: "
+              f"{rpix_sh.mean():+.4f} ± {rpix_sh.std():.4f} "
+              f"| toward target: {(rpix_sh > 0).mean() * 100:.0f}%")
+        lat_off_sh = P["lat_offset"]
         print(f"[shift] recon vs original (latent baseline offset): "
               f"{lat_off_sh.mean():+.4f} ± {lat_off_sh.std():.4f} "
               f"| toward target: {(lat_off_sh > 0).mean() * 100:.0f}%")
-        lat_S_fin = np.asarray(pools["lat_S"], dtype=float)
-        pix_S_fin = np.asarray(pools["pix_S"], dtype=float)
+        lat_S_fin, pix_S_fin = P["lat_S"], P["pix_S"]
         print(f"[pair-mass] final p_s+p_t per walk: latent {lat_S_fin.mean():.3f} ± "
               f"{lat_S_fin.std():.3f} (min {lat_S_fin.min():.3f}) | pixels "
               f"{pix_S_fin.mean():.3f} ± {pix_S_fin.std():.3f} "
-              f"(min {pix_S_fin.min():.3f})")
+              f"(min {pix_S_fin.min():.3f}) | latent random "
+              f"{P['rlat_S'].mean():.3f} ± {P['rlat_S'].std():.3f} "
+              f"(min {P['rlat_S'].min():.3f}) | pixels random "
+              f"{P['rpix_S'].mean():.3f} ± {P['rpix_S'].std():.3f} "
+              f"(min {P['rpix_S'].min():.3f})")
     else:
+        P = None
         print("[balance] no transfer entries collected — skipping plots")
 
     # ── Metric 2 summary: normalised dispersion, latent vs pixel control ──────
     if var_rows:
-        names  = [r[0] for r in var_rows]
-        lat_r  = np.array([r[2] for r in var_rows])
-        pix_r  = np.array([r[3] for r in var_rows])
-        class_of = {r[0]: r[1] for r in var_rows}
+        names  = [r["name"] for r in var_rows]
+        lat_r  = np.array([r["lat"] for r in var_rows])
+        pix_r  = np.array([r["pix"] for r in var_rows])
+        rlat_r = np.array([r["rlat"] for r in var_rows])
+        rpix_r = np.array([r["rpix"] for r in var_rows])
+        class_of = {r["name"]: r["cls"] for r in var_rows}
         cmap = plt.get_cmap("tab10")
         colors = [cmap(class_names.index(class_of[n])) for n in names]
 
         x_pos = np.arange(len(names))
-        fig, ax = plt.subplots(figsize=(max(9, 0.55 * len(names)), 4.5))
-        ax.bar(x_pos - 0.2, lat_r, width=0.4, color=colors, label="latent (encoder norm)")
-        ax.bar(x_pos + 0.2, pix_r, width=0.4, color="lightgray",
-               edgecolor="gray", label="pixels (control)")
+        w = 0.2
+        fig, ax = plt.subplots(figsize=(max(10, 0.8 * len(names)), 4.8))
+        ax.bar(x_pos - 1.5 * w, lat_r, width=w, color=colors)
+        ax.bar(x_pos - 0.5 * w, rlat_r, width=w, color=colors,
+               hatch="//", edgecolor="white", alpha=0.6)
+        ax.bar(x_pos + 0.5 * w, pix_r, width=w, color="lightgray", edgecolor="gray")
+        ax.bar(x_pos + 1.5 * w, rpix_r, width=w, color="lightgray",
+               edgecolor="gray", hatch="//", alpha=0.6)
         ax.set_xticks(x_pos)
         ax.set_xticklabels(names, rotation=45, ha="right")
         ax.set_ylabel("boundary dispersion / data-spread (lower = more agreement)")
-        ax.set_title(f"Normalised boundary dispersion — {len(classifiers)} classifiers")
+        ax.set_title(f"Normalised boundary dispersion — {len(classifiers)} classifiers "
+                     f"(random = mean of {n_rand} draws)")
         ax.grid(alpha=0.3, axis="y")
-        handles = [plt.Rectangle((0, 0), 1, 1, color=cmap(i)) for i in range(len(class_names))]
-        handles.append(plt.Rectangle((0, 0), 1, 1, color="lightgray", ec="gray"))
-        ax.legend(handles, class_names + ["pixels (control)"], fontsize=8)
+        handles = [Patch(color=cmap(i)) for i in range(len(class_names))]
+        handles += [Patch(facecolor="lightgray", edgecolor="gray"),
+                    Patch(facecolor="white", edgecolor="gray", hatch="//")]
+        ax.legend(handles,
+                  class_names + ["pixels (grey, solid = gradient)",
+                                 "random offsets (hatched)"], fontsize=8)
         fig.tight_layout()
         var_path = os.path.join(OUT_DIR, "boundary_latent_variance.png")
         plt.savefig(var_path, bbox_inches="tight", dpi=150)
         print(f"Saved plot: {var_path}")
         maybe_show(fig)
         print("[variance] per-image dispersion (raw | per-dim | ratio vs data spread):")
-        for name, r in zip(names, var_rows):
-            print(f"  {name:14s} latent {r[4]:.1f} | {r[5]:.4f} | {r[2]:.4f}   "
-                  f"pixel ratio {r[3]:.4f}")
+        for r in var_rows:
+            print(f"  {r['name']:14s} latent {r['lat_var']:.1f} | {r['lat_pd']:.4f} | "
+                  f"{r['lat']:.4f}   pixel ratio {r['pix']:.4f}   "
+                  f"random: latent {r['rlat']:.4f}, pixel {r['rpix']:.4f}")
         print(f"  ratio across images — latent: {lat_r.mean():.4f} ± {lat_r.std():.4f} | "
-              f"pixel: {pix_r.mean():.4f} ± {pix_r.std():.4f}")
+              f"pixel: {pix_r.mean():.4f} ± {pix_r.std():.4f} | "
+              f"latent random: {rlat_r.mean():.4f} ± {rlat_r.std():.4f} | "
+              f"pixel random: {rpix_r.mean():.4f} ± {rpix_r.std():.4f}")
     else:
         print("[variance] no dispersion values collected — skipping plot")
+        lat_r = pix_r = rlat_r = rpix_r = None
+
+    # ── Summary table: all four methods ───────────────────────────────────────
+    if P is not None and lat_r is not None:
+        print("\n[summary] all four methods (pooled over images × classifiers)")
+        print(f"{'method':<16s} {'diag Δ% (mean ± sd)':<18s} | "
+              f"{'off Δ% (mean ± sd)':<18s} | {'|Δ%|≤5':>5s} | "
+              f"{'off margin':>10s} | {'shift (toward)':<17s} | "
+              f"{'S':<5s} | disp")
+        print(_table_row("latent gradient", P["lat_diag"], P["lat_off"],
+                         P["lat_off_abs"], P["lat_shift"], P["lat_S"], lat_r.mean()))
+        print(_table_row("latent random", P["rlat_diag"], P["rlat_off"],
+                         P["rlat_off_abs"], P["rlat_shift"], P["rlat_S"], rlat_r.mean()))
+        print(_table_row("pixel gradient", P["pix_diag"], P["pix_off"],
+                         P["pix_off_abs"], P["pix_shift"], P["pix_S"], pix_r.mean()))
+        print(_table_row("pixel random", P["rpix_diag"], P["rpix_off"],
+                         P["rpix_off_abs"], P["rpix_shift"], P["rpix_S"], rpix_r.mean()))
 
     print("\nEnsemble boundary demo complete. Plots in:", OUT_DIR)
 
