@@ -290,7 +290,7 @@ class FolderDataset(Dataset):
         If True, all images are loaded into RAM at init.
     """
 
-    VALID_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+    VALID_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 
     def __init__(
         self,

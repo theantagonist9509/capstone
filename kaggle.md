@@ -1,10 +1,11 @@
 # Running training on Kaggle
 
-The capstone training/traversal scripts (`runs/shapes/*.py`) are the source of
-truth. They are annotated with `# %%` cell markers (jupytext's light format),
+The capstone training/traversal scripts (`runs/<dataset>/*.py`) are the source
+of truth. They are annotated with `# %%` cell markers (jupytext's light format),
 so `kaggle.py` can convert them into Kaggle notebooks with **jupytext**, push
 them with the Kaggle API, and execute them on a GPU — with plots rendered
-inline in the notebook.
+inline in the notebook. The dataset is inferred from the script path
+(`runs/<dataset>/…` → `DATASETS[<dataset>]` in `kaggle.py`).
 
 ```
 annotated .py  ──kaggle.py (jupytext)──▶  .ipynb  ──push──▶  run
@@ -21,9 +22,11 @@ annotated .py  ──kaggle.py (jupytext)──▶  .ipynb  ──push──▶ 
 - The `muplus2sigma/btp-26` kernel on kaggle.com has:
   - **GPU** enabled,
   - **Internet** enabled (the bootstrap shallow-clones this repo at run time),
-  - the **`smeschke/four-shapes` dataset** attached (`dataset_sources` —
-    push also sets this; its class folders live under `shapes/`, which the
-    bootstrap's walk finds and copies into `<clone>/dataset/shapes`),
+  - the datasets for the run dir attached (`dataset_sources` — push also sets
+    them from `DATASETS` in `kaggle.py`). `runs/shapes/` uses
+    `smeschke/four-shapes`; `runs/kather-et-al-2018/` uses
+    `imrankhan77/nct-crc-he-100k` (train) + `imrankhan77/crc-val-he-7k` (val).
+    Each source is symlinked into `<clone>/dataset/<dest>` by the bootstrap,
   - a **package-manager attachment** providing `pytorch-msssim`,
   - **2× T4 GPUs** — the run scripts auto-wrap the model in `nn.DataParallel`
     and scale `BATCH_SIZE` by `torch.cuda.device_count()`; checkpoints are
@@ -75,8 +78,8 @@ python kaggle.py runs/shapes/train_classifier.py --smoke --push-no-run  # upload
 (`--kernel owner/slug` to override). `--push-no-run` uses Kaggle's
 quick-save API (`KernelExecutionType.QUICK_SAVE`), which updates the kernel
 without starting a session; `--push-run` starts a run like `kaggle kernels push`.
-Both set GPU, internet, the `smeschke/four-shapes` dataset attachment, and a
-title that matches the kernel slug.
+Both set GPU, internet, the dataset attachments for the inferred run dir
+(see `DATASETS` in `kaggle.py`), and a title that matches the kernel slug.
 
 The generated `.ipynb` (default: alongside the `.py`) contains:
 
@@ -100,13 +103,15 @@ run on Kaggle.
   removed and re-cloned fresh. Prints the resulting commit SHA (the
   notebook's code cells are self-contained; the clone is needed for the
   repo's *modules* — `custom_datasets.py`, `models.py`, …),
-- finds the attached dataset by walking `/kaggle/input` for its class folders
-  (the mount path is nested as
-  `/kaggle/input/datasets/<owner>/<slug>/…` and has changed before — the walk
-  makes the bootstrap layout-agnostic) and copies it to
-  `<clone>/dataset/<name>` (skipped when the destination already exists —
-  reading through the `/kaggle/input` mount is slow; `/kaggle/working`
-  persists between kernel runs),
+- links each attached dataset into `<clone>/dataset/<dest>`: it walks
+  `/kaggle/input` for a directory containing the source's required entries
+  (the mount path is nested as `/kaggle/input/datasets/<owner>/<slug>/…` and
+  has changed before — the walk makes the bootstrap layout-agnostic) and
+  creates a **symlink**, never a copy (`/kaggle/input` is read-only and the
+  100k-image train set is too large to duplicate; a stale real copy from an
+  older run is removed first). When several sources share the same folder
+  names (the two Kather sets both have the 9 class dirs), a path `hint`
+  disambiguates them,
 - `sys.path.insert(0, ROOT)`, re-points `__file__` into the clone (so the
   scripts' `dirname(__file__)`-based repo-root math works unchanged), and
   sanitises `sys.argv` for `argparse`,
@@ -204,7 +209,7 @@ local `checkpoints/` tree as needed for the traversal notebook.
 
 ## Smoke-first workflow
 
-1. `python kaggle.py runs/shapes/<script>.py --smoke`
+1. `python kaggle.py runs/<dataset>/<script>.py --smoke`
 2. push; wait for `COMPLETE`; `kaggle kernels logs` — look for
    `[bootstrap] GPU: Tesla T4` and the `[SMOKE] …` marker lines.
 3. If green, push the full (non-`--smoke`) notebook and let it train.
