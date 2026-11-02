@@ -26,7 +26,7 @@ annotated .py  ──kaggle.py (jupytext)──▶  .ipynb  ──push──▶ 
     them from `DATASETS` in `kaggle.py`). `runs/shapes/` uses
     `smeschke/four-shapes`; `runs/kather-et-al-2018/` uses
     `imrankhan77/nct-crc-he-100k` (train) + `imrankhan77/crc-val-he-7k` (val).
-    Each source is symlinked into `<clone>/dataset/<dest>` by the bootstrap,
+    Each source is copied once into `<clone>/dataset/<dest>` by the bootstrap,
   - a **package-manager attachment** providing `pytorch-msssim`,
   - **2× T4 GPUs** — the run scripts auto-wrap the model in `nn.DataParallel`
     and scale `BATCH_SIZE` by `torch.cuda.device_count()`; checkpoints are
@@ -103,15 +103,19 @@ run on Kaggle.
   removed and re-cloned fresh. Prints the resulting commit SHA (the
   notebook's code cells are self-contained; the clone is needed for the
   repo's *modules* — `custom_datasets.py`, `models.py`, …),
-- links each attached dataset into `<clone>/dataset/<dest>`: it walks
+- copies each attached dataset into `<clone>/dataset/<dest>`: it walks
   `/kaggle/input` for a directory containing the source's required entries
   (the mount path is nested as `/kaggle/input/datasets/<owner>/<slug>/…` and
   has changed before — the walk makes the bootstrap layout-agnostic) and
-  creates a **symlink**, never a copy (`/kaggle/input` is read-only and the
-  100k-image train set is too large to duplicate; a stale real copy from an
-  older run is removed first). When several sources share the same folder
-  names (the two Kather sets both have the 9 class dirs), a path `hint`
-  disambiguates them,
+  copies it with a thread pool. Reading through `/kaggle/input` is slow,
+  especially for the 100k small TIFFs, so the clone gets a real copy. The copy
+  is made into a temp dir and renamed atomically, with a
+  `.bootstrap_complete` marker; later runs in the same kernel (where
+  `/kaggle/working` persists) skip it. When several sources share the same
+  folder names (the two Kather sets both have the 9 class dirs), a path `hint`
+  disambiguates them. Set `CAPSTONE_USE_INPUT=1` in the kernel to skip the copy;
+  the run scripts then resolve the dataset under `/kaggle/input` directly
+  (temporary A/B test),
 - `sys.path.insert(0, ROOT)`, re-points `__file__` into the clone (so the
   scripts' `dirname(__file__)`-based repo-root math works unchanged), and
   sanitises `sys.argv` for `argparse`,

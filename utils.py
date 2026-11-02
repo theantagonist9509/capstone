@@ -5,6 +5,42 @@ import torch
 
 
 # %%
+def _use_kaggle_input() -> bool:
+    return os.environ.get("CAPSTONE_USE_INPUT", "0").lower() in ("1", "true", "yes")
+
+
+def kaggle_input_dir(required, hint=None, root="/kaggle/input"):
+    """Find the mounted Kaggle dataset directory containing all `required`
+    entries. `hint` optionally restricts the path to substrings (used to tell
+    apart datasets with identical folder names)."""
+    if not os.path.isdir(root):
+        raise FileNotFoundError(f"'{root}' does not exist — is this on Kaggle?")
+    for dirpath, dirnames, _ in os.walk(root):
+        if dirpath.count(os.sep) > 7:
+            dirnames[:] = []
+            continue
+        try:
+            if not set(required).issubset(os.listdir(dirpath)):
+                continue
+        except OSError:
+            continue
+        if hint is None or any(h.lower() in dirpath.lower() for h in hint):
+            return dirpath
+    raise FileNotFoundError(
+        f"no directory under '{root}' contains {sorted(required)}"
+        + (f" and matches {hint}" if hint else "")
+    )
+
+
+def dataset_dir(local_dir, required, hint=None):
+    """`local_dir` by default; with CAPSTONE_USE_INPUT=1, the mounted Kaggle
+    source instead. Temporary A/B switch for the /kaggle/input question."""
+    if _use_kaggle_input():
+        return kaggle_input_dir(required, hint)
+    return local_dir
+
+
+# %%
 def in_ipython() -> bool:
     """True when running under IPython / Jupyter (incl. Kaggle notebooks)."""
     try:

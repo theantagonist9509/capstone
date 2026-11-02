@@ -5,7 +5,7 @@ and optionally push it to the kernel.
 
 Cell splitting is done by **jupytext** (the scripts' `# %%` markers are its
 light format); this script only prepends a markdown header and a bootstrap
-cell that prepares the Kaggle environment (clones the repo, links the
+cell that prepares the Kaggle environment (clones the repo, copies the
 datasets into the clone, fixes ``__file__`` / ``sys.argv``, enables inline
 plots). The dataset is inferred from the script path (``runs/<dataset>/…``,
 see ``DATASETS``), which also selects the dataset sources attached on push.
@@ -35,7 +35,7 @@ REPO_URL = "https://github.com/theantagonist9509/capstone.git"
 DEFAULT_KERNEL_ID = "muplus2sigma/btp-26"
 
 # Datasets the notebooks can use, keyed by the `runs/<name>/` directory they
-# live under. Each entry is a list of Kaggle sources, all linked into the
+# live under. Each entry is a list of Kaggle sources, all copied into the
 # clone as `dataset/<dest>`:
 #   kaggle_source : dataset to attach on push (None = attach manually)
 #   required      : entries that must all exist in the dataset directory
@@ -88,7 +88,7 @@ def dataset_for_script(script_rel: str) -> str:
 
 def bootstrap_code(script_rel: str, extra_argv, dataset: str) -> str:
     """The Kaggle setup cell, parameterised by script path, extra CLI args and
-    the dataset (inferred from the script path). Each dataset source is linked
+    the dataset (inferred from the script path). Each dataset source is copied
     into the clone as `dataset/<dest>`."""
     argv_repr = repr([script_rel] + list(extra_argv))
     sources_repr = repr([
@@ -119,10 +119,13 @@ print("[bootstrap] repo at commit:", subprocess.check_output(
 # Dependencies (e.g. pytorch-msssim) come from the kernel's package-manager
 # attachment — no pip installs here. See kaggle.md.
 
-# Link each attached dataset into the clone as dataset/<dest>. /kaggle/input is
-# read-only and the 100k image set is too large to copy, so the clone always
-# gets symlinks — never copies.
+# Copy each attached dataset into the clone as dataset/<dest>. Reading through
+# the /kaggle/input mount is slow (especially for the 100k small TIFFs), so the
+# clone gets a real copy; /kaggle/working persists, so later runs skip it.
+# CAPSTONE_USE_INPUT=1 skips the copy and lets the run scripts read the mount.
 _sources = {sources_repr}
+_COMPLETE = ".bootstrap_complete"
+_USE_INPUT = os.environ.get("CAPSTONE_USE_INPUT", "0").lower() in ("1", "true", "yes")
 
 
 def _looks_like(path, required):
@@ -139,33 +142,92 @@ def _matches_hint(path, hint):
     return any(h.lower() in path for h in hint)
 
 
-for _src in _sources:
-    _ds_dst = os.path.join(ROOT, "dataset", _src["dest"])
-    if os.path.islink(_ds_dst) or os.path.isfile(_ds_dst):
-        os.unlink(_ds_dst)
-    elif os.path.isdir(_ds_dst):
-        # old real copy from the previous bootstrap — replace it with a link
-        shutil.rmtree(_ds_dst)
-
-    _ds_src = None
+def _find_source(spec):
     for _dirpath, _dirnames, _ in os.walk("/kaggle/input"):
         if _dirpath.count(os.sep) > 7:
             _dirnames[:] = []
             continue
-        if (_looks_like(_dirpath, _src["required"])
-                and _matches_hint(_dirpath, _src["hint"])):
-            _ds_src = _dirpath
-            break
+        if (_looks_like(_dirpath, spec["required"])
+                and _matches_hint(_dirpath, spec["hint"])):
+            return _dirpath
+    return None
 
+
+def _copy_tree(src, dst, workers=(os.cpu_count() or 4) * 2):
+    # The reads are I/O-bound, so a thread pool overlaps the per-file latency
+    # instead of copying strictly one file at a time.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    try:
+        from tqdm.auto import tqdm as _tqdm
+    except Exception:
+        _tqdm = None
+
+    pairs = []
+    for _dirpath, _, _filenames in os.walk(src):
+        _rel = os.path.relpath(_dirpath, src)
+        _out = dst if _rel == "." else os.path.join(dst, _rel)
+        os.makedirs(_out, exist_ok=True)
+        for _f in _filenames:
+            pairs.append((os.path.join(_dirpath, _f), os.path.join(_out, _f)))
+
+    _label = os.path.basename(dst)
+    if _label.endswith(".tmp"):
+        _label = _label[:-4]
+
+    with ThreadPoolExecutor(max_workers=workers) as _ex:
+        _futs = [_ex.submit(shutil.copyfile, _s, _d) for _s, _d in pairs]
+        _done = as_completed(_futs)
+        if _tqdm is not None:
+            _done = _tqdm(_done, total=len(_futs), unit="file", leave=False,
+                          desc=f"[bootstrap] copy {{_label}}")
+        for _fut in _done:
+            _fut.result()
+    return len(pairs)
+
+
+for _src in _sources:
+    _ds_src = _find_source(_src)
     if _ds_src is None:
         raise SystemExit(
             f"[bootstrap] dataset '{{_src['dest']}}' not found under /kaggle/input "
             f"(need {{sorted(_src['required'])}}"
             + (f", path hint {{_src['hint']}}" if _src["hint"] else "") + ")")
 
+    if _USE_INPUT:
+        print(f"[bootstrap] CAPSTONE_USE_INPUT=1 — using mount directly: {{_ds_src}}")
+        continue
+
+    _ds_dst = os.path.join(ROOT, "dataset", _src["dest"])
+    if os.path.islink(_ds_dst) or os.path.isfile(_ds_dst):
+        # stale symlink/file from an older bootstrap — replace with a real copy
+        os.unlink(_ds_dst)
+    if os.path.isdir(_ds_dst):
+        _ready = os.path.join(_ds_dst, _COMPLETE)
+        if _looks_like(_ds_dst, _src["required"]) and os.path.isfile(_ready):
+            print(f"[bootstrap] dataset already copied — skipping: {{_ds_dst}}")
+            continue
+        # incomplete/legacy copy — rebuild it
+        shutil.rmtree(_ds_dst)
+
+    # Copy into a temp dir and rename atomically: an interrupted run must not
+    # leave a half-populated dataset that the "already copied" check would trust.
+    _tmp_dst = _ds_dst + ".tmp"
+    if os.path.isdir(_tmp_dst):
+        shutil.rmtree(_tmp_dst)
+    elif os.path.exists(_tmp_dst):
+        os.unlink(_tmp_dst)
     os.makedirs(os.path.dirname(_ds_dst), exist_ok=True)
-    os.symlink(_ds_src, _ds_dst)
-    print(f"[bootstrap] dataset linked: {{_ds_src}} -> {{_ds_dst}}")
+    _t_copy = time.time()
+    try:
+        _n_files = _copy_tree(_ds_src, _tmp_dst)
+        open(os.path.join(_tmp_dst, _COMPLETE), "w").close()
+        os.replace(_tmp_dst, _ds_dst)
+    except BaseException:
+        shutil.rmtree(_tmp_dst, ignore_errors=True)
+        raise
+    print(f"[bootstrap] dataset copied: {{_ds_src}} -> {{_ds_dst}} "
+          f"({{_n_files}} files, {{time.time() - _t_copy:.1f}}s)")
 
 sys.path.insert(0, ROOT)
 # Re-point __file__ so the script's repo-root math resolves inside the clone,

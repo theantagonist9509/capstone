@@ -41,7 +41,7 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from custom_datasets import FolderDataset
-from utils import maybe_show
+from utils import dataset_dir, maybe_show
 
 # %% [markdown]
 # ## Parameters
@@ -56,14 +56,12 @@ CLASS_NAMES      = ["ADI", "BACK", "DEB", "LYM", "MUC", "MUS", "NORM", "STR", "T
 IMAGE_SIZE       = 224
 BASE_CHANNELS    = 32
 BATCH_SIZE_PER_GPU = 64
-# I/O-bound on Kaggle's /kaggle/input mount (100k small TIFFs), so oversubscribe
-# the few vCPUs to hide per-file latency; prefetch keeps more batches in flight.
-NUM_WORKERS      = max(8, min(16, (os.cpu_count() or 4) * 3))
-PREFETCH_FACTOR  = 8
+NUM_WORKERS      = 4
+PREFETCH_FACTOR  = 2
 LEARNING_RATE    = 1e-3
 NUM_EPOCHS       = 5
 DEVICE           = "cuda" if torch.cuda.is_available() else "cpu"
-NUM_GPUS         = torch.cuda.device_count()
+NUM_GPUS         = 1
 BATCH_SIZE       = BATCH_SIZE_PER_GPU * max(1, NUM_GPUS)
 
 if DEVICE == "cuda":
@@ -99,10 +97,14 @@ transform = transforms.Compose([
 
 def build_loaders():
     train_ds = FolderDataset(
-        root_dir=TRAIN_DIR, transform=transform, class_names=CLASS_NAMES,
+        root_dir=dataset_dir(TRAIN_DIR, CLASS_NAMES,
+                             hint=("nct-crc-he-100k", "NCT-CRC-HE-100K")),
+        transform=transform, class_names=CLASS_NAMES,
     )
     val_ds = FolderDataset(
-        root_dir=VAL_DIR, transform=transform, class_names=CLASS_NAMES,
+        root_dir=dataset_dir(VAL_DIR, CLASS_NAMES,
+                             hint=("crc-val-he-7k", "CRC-VAL-HE-7K")),
+        transform=transform, class_names=CLASS_NAMES,
     )
     train_loader = DataLoader(
         train_ds, batch_size=BATCH_SIZE, shuffle=True, **LOADER_KWARGS,
